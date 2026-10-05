@@ -74,8 +74,20 @@ private fun corpus(args: Map<String, String>, lang: io.github.completionml.core.
 
 private fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.tokenizer.tokens(s.file.readText())
 
-/** Tokenised train/test files; with `--dedup <jaccard>` exact and near duplicates are dropped (train first, then test). */
-class Loaded(val train: List<Pair<Corpus.Source, List<MlToken>>>, val test: List<Pair<Corpus.Source, List<MlToken>>>)
+/**
+ * Train/test files after the split and `--dedup`; tokens are not kept — every pass re-tokenises the files in parallel batches
+ * ([forEachTokenised]), so memory does not grow with the corpus (a million files would not fit as token lists).
+ */
+class Loaded(val train: List<Corpus.Source>, val test: List<Corpus.Source>)
+
+/** Tokenises [sources] in parallel batches and hands the files to [consumer] one by one, in order, on the calling thread. */
+private fun forEachTokenised(corpus: Corpus, sources: List<Corpus.Source>, batch: Int = 256, consumer: (Corpus.Source, List<MlToken>) -> Unit) {
+    for (from in sources.indices step batch) {
+        val chunk = sources.subList(from, minOf(from + batch, sources.size))
+        val tokens = chunk.parallelStream().map { readTokens(corpus, it) }.toList()
+        for (i in chunk.indices) consumer(chunk[i], tokens[i])
+    }
+}
 
 private fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = null): Loaded {
     val files = corpus.files().let { f -> maxFiles?.let { f.take(it) } ?: f }
@@ -84,7 +96,12 @@ private fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = nul
     val testSrc = if (maxTest == null || testAll.size <= maxTest) testAll
                   else { val step = testAll.size.toDouble() / maxTest; List(maxTest) { testAll[(it * step).toInt()] } }
     val dedup = args["dedup"]?.toDouble()?.let { Dedup(it) }
-    fun take(list: List<Corpus.Source>) = list.mapNotNull { s -> val t = readTokens(corpus, s); if (dedup == null || dedup.offer(t)) s to t else null }
+    fun take(list: List<Corpus.Source>): List<Corpus.Source> {
+        if (dedup == null) return list
+        val kept = ArrayList<Corpus.Source>(list.size)
+        forEachTokenised(corpus, list) { s, t -> if (dedup.offer(t)) kept.add(s) }
+        return kept
+    }
     val train = take(trainSrc); val test = take(testSrc)
     log("${corpus.language.id}: ${corpus.repos.size} repos, ${files.size} files (train ${trainSrc.size}, test ${testSrc.size}), split by ${if (corpus.repos.size >= 20 && corpus.splitBy == "auto") "repo" else corpus.splitBy}")
     if (dedup != null) log("$dedup -> train ${train.size}, test ${test.size}")
@@ -100,21 +117,20 @@ private fun trainLm(args: Map<String, String>) {
     fun perOrder(key: String) = (args[key] ?: "1").split(",").map { it.trim().toInt() }.let { l -> IntArray(order) { l.getOrElse(it) { l.last() } } }
     val minCounts = perOrder("min-count"); val minRepos = perOrder("min-repos")
     val loaded = load(corpus, args)
-    val train = loaded.train.map { it.first }; val test = loaded.test
+    val train = loaded.train; val test = loaded.test
     log("order $order")
 
     // pass 1: vocabulary
     val vb = Vocabulary.Builder()
-    val tokenised = ArrayList<List<MlToken>>(train.size)
-    for ((_, t) in loaded.train) { tokenised.add(t); vb.addFile(t) }
+    forEachTokenised(corpus, train) { _, t -> vb.addFile(t) }
     val vocab = vb.build(maxVocab, minDocFreq = if (corpus.repos.size >= 20) 2 else 1)
     log("vocabulary: ${vocab.size} entries from ${vb.tokens} tokens in ${vb.files} files")
 
-    // pass 2: counts
-    val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.toInt().coerceAtLeast(1 shl 16), trackRepos = minRepos.any { it > 1 })
+    // pass 2: counts (files re-tokenised; grouped by repository so that repo counts are exact)
+    val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1 shl 16), trackRepos = minRepos.any { it > 1 })
     val repoIndex = corpus.repos.withIndex().associate { it.value.name to it.index }
-    for ((i, t) in tokenised.withIndex()) trainer.addFile(vocab.encode(t), repoIndex.getValue(train[i].repo))
-    tokenised.clear()
+    forEachTokenised(corpus, train) { s, t -> trainer.addFile(vocab.encode(t), repoIndex.getValue(s.repo)) }
+    log("counted ${trainer.tokens} tokens in ${trainer.files} files")
     val smoothing = NgramTrainer.Smoothing.valueOf((args["smoothing"] ?: "mkn").uppercase())
     val exact = trainer.estimate(minCounts, minRepos, smoothing, args["lambda"]?.toDouble() ?: 0.5) { log(it) }
     log("smoothing: $smoothing" + if (smoothing == NgramTrainer.Smoothing.JM) " λ=${args["lambda"] ?: "0.5"}" else "")
@@ -146,11 +162,12 @@ private class LmFileStats {
 }
 
 /** Perplexity over all tokens; next-token top-1/top-5 over identifiers that are in the vocabulary (what gray text could predict). */
-private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Pair<Corpus.Source, List<MlToken>>>, cacheLambda: Double = 0.0) {
+private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Source>, cacheLambda: Double = 0.0) {
     val t0 = System.currentTimeMillis()
     val vocab = model.vocab
     val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
-    val stats = test.parallelStream().map { (_, tokens) ->
+    val stats = test.parallelStream().map { source ->
+        val tokens = readTokens(corpus, source)
         val st = LmFileStats()
         val ids = vocab.encode(tokens)
         val padded = IntArray(ids.size + model.order - 1) { if (it < model.order - 1) Vocabulary.BOS_ID else ids[it - model.order + 1] }
@@ -222,8 +239,8 @@ private fun trainRanker(args: Map<String, String>) {
                                         baseCount = args["features"]?.toInt() ?: FeatureSchema.BASE.size)
         schema = gen.schema()
         log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
-        for ((_, t) in loaded.train) gen.generate(t) { trainEx.add(it) }
-        for ((_, t) in loaded.test) gen.generate(t) { testEx.add(it) }
+        forEachTokenised(corpus, loaded.train) { _, t -> gen.generate(t) { trainEx.add(it) } }
+        forEachTokenised(corpus, loaded.test) { _, t -> gen.generate(t) { testEx.add(it) } }
         source = "proxy examples; lm=${args.getValue("lm")}"
         args["dump-shards"]?.let { dir ->
             File(dir).mkdirs()
@@ -249,6 +266,8 @@ private fun trainRanker(args: Map<String, String>) {
         "baseline: most frequent in file" to { ex: TrainingExample -> FloatArray(ex.size) { ex.baseFeature(it, single("file_freq_log")) } },
         "baseline: most recent in file" to { ex: TrainingExample -> FloatArray(ex.size) { -ex.baseFeature(it, single("recency_log")) } },
     )
+    // plugin adapters record their own deterministic order as `rule_rank_log`: the "rules only" baseline the ML has to beat
+    if (schema.baseIndex("rule_rank_log") >= 0) baselines["baseline: plugin rules (rule_rank_log)"] = { ex: TrainingExample -> FloatArray(ex.size) { -ex.baseFeature(it, single("rule_rank_log")) } }
     for ((title, scorer) in baselines) {
         if (testEx.isEmpty()) break
         val m = RankMetrics()
@@ -267,9 +286,13 @@ private fun evalRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
     val ranker = LinearRanker.read(File(args.getValue("rank")))
     val m = RankMetrics(); val base = RankMetrics()
-    val lmIdx = ranker.schema.baseIndex("lm_logprob")
+    val lmIdx = ranker.schema.baseIndex("lm_logprob"); val ruleIdx = ranker.schema.baseIndex("rule_rank_log")
+    val rules = RankMetrics()
     var n = 0
-    val add = { ex: TrainingExample -> n++; m.add(ex, ranker.scores(ex)); base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) }) }
+    val add = { ex: TrainingExample ->
+        n++; m.add(ex, ranker.scores(ex)); base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) })
+        if (ruleIdx >= 0) rules.add(ex, FloatArray(ex.size) { -ex.baseFeature(it, ruleIdx) })
+    }
     if (args["shards"] != null) {
         val (header, _) = ExampleShards.readAll(File(args.getValue("shards")), object : AbstractMutableList<TrainingExample>() {
             override val size get() = 0
@@ -286,11 +309,12 @@ private fun evalRanker(args: Map<String, String>) {
         val test = load(corpus, args, args["max-files"]?.toInt()).test
         val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0, baseCount = ranker.schema.baseSize)
         require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
-        for ((_, t) in test) gen.generate(t, add)
+        forEachTokenised(corpus, test) { _, t -> gen.generate(t, add) }
         log("${lang.id}: ${test.size} test files, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
     }
     System.err.print(m.report("ranker"))
     System.err.print(base.report("baseline: n-gram log-prob only"))
+    if (ruleIdx >= 0) System.err.print(rules.report("baseline: plugin rules (rule_rank_log)"))
 }
 
 private fun dumpTokens(args: Map<String, String>) {
