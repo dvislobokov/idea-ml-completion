@@ -6,3 +6,4 @@ build/
 tools/corpus/data/*.jsonl
 tools/corpus/data/*.txt
 tools/corpus/data/*.log
+.server-commit
