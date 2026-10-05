@@ -263,3 +263,31 @@ and 0.006 MRR; still, 20 MB at −0.006 MRR is the plugin candidate. 111 k test 
 
 Order 5 with the same pruning is the best Go model so far: −0.4 perplexity, +1.6 p.p. top-1, +0.005 MRR for 7 MB more. On the
 19-repository local corpus order 5 was not worth its size (e06); on 580 repositories it is. Recommended Go plugin LM: order 5, 27 MB.
+
+## e13 — inline continuation ("grey text") with the n-gram LM: how much of a line it gets right
+
+`ml-train eval-inline`: at every 50th token position of the held-out files the mixed model (per-file cache λ=0.3 + global) greedily
+generates up to 8 tokens; a predicted `<ID>` stops it, an actual out-of-vocabulary identifier never matches. Confidence = geometric mean
+probability of the first three generated tokens — what a feature would gate the suggestion on. Go, server, order-5 LM (e12, 27 MB),
+30 held-out repositories, 1858 files, 45 133 positions (5461 at line starts).
+
+| first k tokens right | k=1 | k=2 | k=3 | k=4 | k=5 | k=8 |
+|---|---|---|---|---|---|---|
+| all positions | 0.631 | 0.403 | 0.287 | 0.205 | 0.157 | 0.083 |
+| line starts | 0.398 | 0.294 | 0.158 | 0.120 | 0.082 | 0.037 |
+
+Rest of the line (≤ 8 tokens) generated exactly: 30.6 % of 28 199 eligible positions; 1.99 correct tokens per position on average.
+
+| show when confidence ≥ | shown | of those, ≥ 3 tokens right | token precision |
+|---|---|---|---|
+| 0 (always) | 100 % | 28.7 % | 0.440 |
+| 0.5 | 37.0 % | 56.2 % | 0.692 |
+| 0.7 | 14.3 % | 80.2 % | 0.868 |
+| 0.8 | 9.0 % | 89.5 % | 0.929 |
+| 0.9 | 2.5 % | 94.9 % | 0.967 |
+
+Reading: mid-line, the LM continues idioms (`err != nil { return err }`, `"error", err)`, closing brackets) — a third of the lines it
+could finish exactly. At line starts it is weak (what statement comes next is not an n-gram question). A gated feature at 0.7–0.8 shows a
+suggestion at 9–14 % of positions and is right in 80–90 % of them (token precision 0.87–0.93), which is the regime of a usable inline
+completion; a neural model is needed for the other 86 %. Cost: greedy argmax over the 50 k vocabulary per token, ~1 ms per step — fine
+for an inline provider that runs after a pause in typing, and reducible with a candidate shortlist from the n-gram table.

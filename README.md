@@ -85,6 +85,7 @@ trained on disjoint repository folds (`../ml-data/<lang>/sets/{lm,rank,test}.txt
 | e10 ranker on real Go completion lists (PSI) | held-out repos: MRR 0.783 vs plugin rules 0.534 (top-1 0.675 vs 0.394) |
 | e11 full corpus on the server (580 Go repos) | LM ppl 5.5 → 5.0, OOV 29 → 21.5 %; proxy ranker MRR 0.739; repo pruning: 163 → 20 MB at −0.002 MRR |
 | e12 full C# corpus (472 repos), Go order 5 | C#: ppl 5.9, proxy ranker MRR 0.718, 20 MB at −0.006; Go order 5 + repo pruning: ppl 4.7, MRR 0.742, 27 MB (best) |
+| e13 inline continuation with the n-gram LM | Go: 30 % of lines finished exactly; gated at confidence 0.8: shown 9 % of positions, 90 % right |
 
 **Server recipe update:** train the LM on `sets/lm.txt` repositories and the ranker on `sets/rank.txt` (disjoint), hold out
 `sets/test.txt`; pass `--dedup 0.8 --cache 0.3`; prune with `--min-count 1,1,2,2` (re-measure `--min-repos 1,1,1,3` on the full corpus).
