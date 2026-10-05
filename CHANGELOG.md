@@ -213,3 +213,29 @@ needs import, keyword kind (negative). Caveat: `rule_rank_log` reproduces the pl
 weighers that follow it, so the "rules" row is slightly pessimistic. Known gaps: one repository exported 0 lists (headscale: no
 `go.mod` at the root, to check); near-duplicate repositories across folds (v2fly/v2ray-core vs v2ray/v2ray-core — excluded from
 training) call for dedup at the shard level too.
+
+## e11 — full Go corpus on the server (580 repositories), streaming loader, pruning series
+
+Server: AMD EPYC 7443P 24 cores / 64 GB. The provider breaks the git smart protocol towards GitHub ("expected flush after ref
+listing"), so `tools/corpus/fetch.sh` falls back to codeload tarballs (`.commit` records the revision) and
+`tools/server/update.sh` updates the checkout by commit tarball. Corpus: 900 Go repositories (1.07 M files, 11.1 GB), 737 C#
+(0.8 M files, 6.2 GB); folds `sets.sh`: 30 test, 580 lm, 290 rank for Go.
+
+Two engine fixes were needed for corpus-sized counts: (1) `ml-train` no longer keeps token lists of the whole corpus — every
+pass re-tokenises in parallel batches of 256 files (`forEachTokenised`), local regression exact (Go std: ppl 5.5, MRR 0.683);
+(2) `NgramTable` capped at 2^28 slots (the `ids` array overflowed `Int` at 349 M tokens: `NegativeArraySizeException`).
+Counting 349 M tokens takes 5 min, 23 GB peak; LM evaluation 80 s on 3664 files (`--max-test-files 4000`).
+
+| LM (MKN-4, cache λ=0.3, 30 held-out repos) | n-grams | size | ppl | OOV | top-1 / top-5 | proxy ranker MRR / top-1 / top-5 |
+|---|---|---|---|---|---|---|
+| local, 19 repos (e07) | 2.5 M | 30 MB | 5.5 | 29.4 % | 0.440 / 0.682 | 0.718 / 0.604 / 0.861 (4 held-out repos) |
+| server, 100 repos | 5.3 M | 53 MB | 5.1 | 24.1 % | 0.453 / 0.713 | — |
+| server, 580 repos, no pruning | 27.1 M | 163 MB | 5.0 | 21.5 % | 0.468 / 0.720 | 0.739 / 0.629 / 0.876 |
+| `--min-count 1,1,2,2` | 12.8 M | 78 MB | 5.0 | 21.5 % | 0.470 / 0.722 | 0.739 / 0.629 / 0.876 |
+| `--min-count 1,2,3,3` | 8.1 M | 50 MB | 5.1 | 21.5 % | 0.470 / 0.722 | 0.738 / 0.629 / 0.875 |
+| `--min-count 1,1,2,2 --min-repos 1,1,1,3` | 5.9 M | 35 MB | 5.0 | 21.5 % | 0.480 / 0.727 | 0.738 / 0.628 / 0.874 |
+| **`--min-count 1,1,3,3 --min-repos 1,1,2,5`** | 3.4 M | **20 MB** | 5.1 | 21.5 % | **0.481 / 0.727** | 0.737 / 0.627 / 0.873 |
+
+Ranker on the full corpus: 731 k training lists (`PER_FILE=10`), LM-only baseline 0.575. Repository-count pruning, which hurt
+on 19 repositories (e03), now improves identifier top-1 by 1 p.p. while cutting the model 8×: project-specific n-grams only
+add noise on unseen code. Recommended plugin model: the 20 MB variant. Report in Russian: `docs/REPORT-GO-RU.md`.

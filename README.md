@@ -82,6 +82,8 @@ trained on disjoint repository folds (`../ml-data/<lang>/sets/{lm,rank,test}.txt
 | e05 dedup + repo split | honest numbers: OOV 9 → 29 % / 17 → 27 %, ranker MRR ≈ 0.71–0.72 (file split was optimistic) |
 | e06 JM vs MKN, order 5 | MKN stays; order 5 = −0.4 perplexity for 2× size |
 | e07 list features + cross-fitting | leakage found and fixed; 13 features: MRR 0.718 / 0.723 |
+| e10 ranker on real Go completion lists (PSI) | held-out repos: MRR 0.783 vs plugin rules 0.534 (top-1 0.675 vs 0.394) |
+| e11 full corpus on the server (580 Go repos) | LM ppl 5.5 → 5.0, OOV 29 → 21.5 %; proxy ranker MRR 0.739; repo pruning: 163 → 20 MB at −0.002 MRR |
 
 **Server recipe update:** train the LM on `sets/lm.txt` repositories and the ranker on `sets/rank.txt` (disjoint), hold out
 `sets/test.txt`; pass `--dedup 0.8 --cache 0.3`; prune with `--min-count 1,1,2,2` (re-measure `--min-repos 1,1,1,3` on the full corpus).
