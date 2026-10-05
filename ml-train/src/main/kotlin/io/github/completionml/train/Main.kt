@@ -1,0 +1,196 @@
+package io.github.completionml.train
+
+import io.github.completionml.core.eval.RankMetrics
+import io.github.completionml.core.lex.Languages
+import io.github.completionml.core.ngram.NgramModel
+import io.github.completionml.core.ngram.NgramTrainer
+import io.github.completionml.core.ngram.PerplexityAccumulator
+import io.github.completionml.core.rank.FeatureSchema
+import io.github.completionml.core.rank.LinearRanker
+import io.github.completionml.core.rank.LinearRankerTrainer
+import io.github.completionml.core.rank.ProxyExampleGenerator
+import io.github.completionml.core.rank.TrainingExample
+import io.github.completionml.core.spi.MlToken
+import io.github.completionml.core.spi.TokenKind
+import io.github.completionml.core.vocab.Vocabulary
+import java.io.File
+import kotlin.system.exitProcess
+
+private const val USAGE = """
+usage:
+  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file]
+      count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
+  l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60]
+      generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
+  eval-lm --lang .. --data <dir> --lm <lm.cml>      re-evaluate an n-gram model on the test split
+  eval-rank --lang .. --data <dir> --lm <lm.cml> --rank <rank.cml> [--max-files N]
+      re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
+  tokens  --lang .. --file <path>                   dump tokens (lexer debugging)
+"""
+
+fun main(argv: Array<String>) {
+    if (argv.isEmpty()) { System.err.println(USAGE); exitProcess(2) }
+    val args = parse(argv.drop(1))
+    val t0 = System.currentTimeMillis()
+    when (argv[0]) {
+        "l2" -> trainLm(args)
+        "l1" -> trainRanker(args)
+        "eval-lm" -> evalLm(args)
+        "eval-rank" -> evalRanker(args)
+        "tokens" -> dumpTokens(args)
+        else -> { System.err.println(USAGE); exitProcess(2) }
+    }
+    log("done in %.1f s".format((System.currentTimeMillis() - t0) / 1000.0))
+}
+
+private fun parse(a: List<String>): Map<String, String> {
+    val m = HashMap<String, String>()
+    var i = 0
+    while (i < a.size) {
+        require(a[i].startsWith("--")) { "unexpected argument ${a[i]}" }
+        m[a[i].removePrefix("--")] = a.getOrNull(i + 1) ?: ""
+        i += 2
+    }
+    return m
+}
+
+private fun log(s: String) = System.err.println("[%tT] %s".format(System.currentTimeMillis(), s))
+
+private fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.tokenizer.tokens(s.file.readText())
+
+private fun trainLm(args: Map<String, String>) {
+    val lang = Languages.byId(args.getValue("lang"))
+    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val order = args["order"]?.toInt() ?: 4
+    val maxVocab = args["vocab"]?.toInt() ?: 50_000
+    val minCounts = (args["min-count"] ?: "1").split(",").map { it.trim().toInt() }.let { l -> IntArray(order) { l.getOrElse(it) { l.last() } } }
+    val files = corpus.files()
+    val (test, train) = files.partition { corpus.isTest(it) }
+    log("${lang.id}: ${corpus.repos.size} repos, ${files.size} files (train ${train.size}, test ${test.size}), order $order")
+
+    // pass 1: vocabulary
+    val vb = Vocabulary.Builder()
+    val tokenised = ArrayList<List<MlToken>>(train.size)
+    for (s in train) { val t = readTokens(corpus, s); tokenised.add(t); vb.addFile(t) }
+    val vocab = vb.build(maxVocab, minDocFreq = if (corpus.repos.size >= 20) 2 else 1)
+    log("vocabulary: ${vocab.size} entries from ${vb.tokens} tokens in ${vb.files} files")
+
+    // pass 2: counts
+    val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.toInt().coerceAtLeast(1 shl 16))
+    for (t in tokenised) trainer.addFile(vocab.encode(t))
+    tokenised.clear()
+    val model = trainer.estimate(minCounts) { log(it) }
+    val out = File(args.getValue("out"))
+    model.write(out, lang.id, "repos=${corpus.repos.joinToString(",") { it.name }}")
+    log("written $out (${out.length() / 1024} KB)")
+
+    evaluateLm(model, corpus, test)
+}
+
+private fun evalLm(args: Map<String, String>) {
+    val lang = Languages.byId(args.getValue("lang"))
+    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val model = NgramModel.read(File(args.getValue("lm")))
+    val test = corpus.files().filter { corpus.isTest(it) }
+    evaluateLm(model, corpus, test)
+}
+
+/** Perplexity over all tokens; next-token top-1/top-5 over identifiers that are in the vocabulary (what gray text could predict). */
+private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Source>) {
+    val ppAll = PerplexityAccumulator(); val ppIdent = PerplexityAccumulator()
+    var identPositions = 0L; var top1 = 0L; var top5 = 0L; var oov = 0L; var scored = 0L
+    val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
+    val t0 = System.currentTimeMillis()
+    for (s in test) {
+        val tokens = readTokens(corpus, s)
+        val ids = model.vocab.encode(tokens)
+        val padded = IntArray(ids.size + model.order - 1) { if (it < model.order - 1) Vocabulary.BOS_ID else ids[it - model.order + 1] }
+        for (i in ids.indices) {
+            val pos = i + model.order - 1
+            val lp = model.logProb(padded, pos, ids[i])
+            ppAll.add(lp)
+            if (tokens[i].kind == TokenKind.IDENT) {
+                identPositions++
+                if (ids[i] == Vocabulary.UNK_ID) { oov++; continue }
+                ppIdent.add(lp)
+                if (identPositions % sampleEvery == 0L) {
+                    scored++
+                    val top = model.topK(padded, pos, 5) { model.vocab.isIdentifier(it) && it != Vocabulary.UNK_ID }
+                    if (top.isNotEmpty() && top[0].first == ids[i]) top1++
+                    if (top.any { it.first == ids[i] }) top5++
+                }
+            }
+        }
+    }
+    log("LM eval on ${test.size} files: perplexity all=%.1f (%.2f bits), identifiers in vocab=%.1f; identifier OOV rate=%.1f%%".format(
+        ppAll.perplexity, ppAll.entropyBits, ppIdent.perplexity, 100.0 * oov / identPositions.coerceAtLeast(1)))
+    log("next identifier (sampled %d positions, in-vocab): top1=%.3f top5=%.3f; %.1f s".format(scored, top1.toDouble() / scored.coerceAtLeast(1), top5.toDouble() / scored.coerceAtLeast(1), (System.currentTimeMillis() - t0) / 1000.0))
+}
+
+private fun trainRanker(args: Map<String, String>) {
+    val lang = Languages.byId(args.getValue("lang"))
+    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val lm = NgramModel.read(File(args.getValue("lm")))
+    val files = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }
+    val (test, train) = files.partition { corpus.isTest(it) }
+    val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60)
+    val schema = gen.schema()
+    log("${lang.id}: generating examples from ${train.size} train / ${test.size} test files, ${schema.size} features")
+    val trainEx = ArrayList<TrainingExample>(); val testEx = ArrayList<TrainingExample>()
+    for (s in train) gen.generate(readTokens(corpus, s)) { trainEx.add(it) }
+    for (s in test) gen.generate(readTokens(corpus, s)) { testEx.add(it) }
+    log("examples: train ${trainEx.size}, test ${testEx.size}, avg candidates %.1f".format(trainEx.sumOf { it.size }.toDouble() / trainEx.size.coerceAtLeast(1)))
+
+    val trainer = LinearRankerTrainer(schema, l2 = args["l2"]?.toDouble() ?: 1e-4, learningRate = args["lr"]?.toDouble() ?: 0.1, epochs = args["epochs"]?.toInt() ?: 10)
+    val (ranker, _) = trainer.train(trainEx) { log(it) }
+    val out = File(args.getValue("out"))
+    ranker.write(out, lang.id, "proxy examples; lm=${args.getValue("lm")}")
+    log("written $out")
+
+    // baselines on the same test lists: single features
+    fun single(name: String) = FeatureSchema.BASE.indexOf(name)
+    val baselines = linkedMapOf(
+        "ranker" to { ex: TrainingExample -> ranker.scores(ex) },
+        "baseline: alphabetical (ties -> last)" to { ex: TrainingExample -> FloatArray(ex.size) { 0f } },
+        "baseline: n-gram log-prob only" to { ex: TrainingExample -> FloatArray(ex.size) { ex.baseFeature(it, single("lm_logprob")) } },
+        "baseline: most frequent in file" to { ex: TrainingExample -> FloatArray(ex.size) { ex.baseFeature(it, single("file_freq_log")) } },
+        "baseline: most recent in file" to { ex: TrainingExample -> FloatArray(ex.size) { -ex.baseFeature(it, single("recency_log")) } },
+    )
+    for ((title, scorer) in baselines) {
+        val m = RankMetrics()
+        for (ex in testEx) m.add(ex, scorer(ex))
+        System.err.print(m.report(title))
+    }
+    val t0 = System.nanoTime(); var n = 0
+    for (ex in testEx) { ranker.scores(ex); n += ex.size }
+    log("inference: %.2f µs per candidate".format((System.nanoTime() - t0) / 1000.0 / n.coerceAtLeast(1)))
+    System.err.println("weights (standardised features):")
+    ranker.schema.names.zip(ranker.weights.toList()).filter { kotlin.math.abs(it.second) > 0.05 }.sortedByDescending { kotlin.math.abs(it.second) }.take(20)
+        .forEach { System.err.println("  %-28s %+.3f".format(it.first, it.second)) }
+}
+
+private fun evalRanker(args: Map<String, String>) {
+    val lang = Languages.byId(args.getValue("lang"))
+    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val lm = NgramModel.read(File(args.getValue("lm")))
+    val ranker = LinearRanker.read(File(args.getValue("rank")))
+    val test = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }.filter { corpus.isTest(it) }
+    val gen = ProxyExampleGenerator(lm.vocab, lm)
+    require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
+    val m = RankMetrics(); val base = RankMetrics()
+    val lmIdx = FeatureSchema.BASE.indexOf("lm_logprob")
+    var n = 0
+    for (s in test) gen.generate(readTokens(corpus, s)) { ex ->
+        n++
+        m.add(ex, ranker.scores(ex))
+        base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) })
+    }
+    log("${lang.id}: ${test.size} test files, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
+    System.err.print(m.report("ranker"))
+    System.err.print(base.report("baseline: n-gram log-prob only"))
+}
+
+private fun dumpTokens(args: Map<String, String>) {
+    val lang = Languages.byId(args.getValue("lang"))
+    for (t in lang.tokenizer.tokens(File(args.getValue("file")).readText())) println("${t.kind}\t${t.text}")
+}

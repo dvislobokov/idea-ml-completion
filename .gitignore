@@ -1,0 +1,8 @@
+build/
+.gradle/
+.kotlin/
+.idea/
+*.iml
+tools/corpus/data/*.jsonl
+tools/corpus/data/*.txt
+tools/corpus/data/*.log
