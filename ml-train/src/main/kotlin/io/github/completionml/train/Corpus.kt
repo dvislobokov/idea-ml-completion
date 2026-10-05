@@ -7,15 +7,24 @@ import java.io.File
  * Source files of a language under `<data>/repos/<owner>__<repo>/...`, with generated/vendored files dropped and a
  * deterministic train/test split (by repository when there are enough of them, otherwise by file hash).
  */
-class Corpus(val root: File, val language: MlLanguage, val splitBy: String = "auto", val testShare: Int = 10) {
+class Corpus(val root: File, val language: MlLanguage, val splitBy: String = "auto", val testShare: Int = 10, includeList: File? = null) {
     class Source(val repo: String, val file: File)
 
-    val repos: List<File> = File(root, "repos").listFiles { f -> f.isDirectory }?.sortedBy { it.name } ?: emptyList()
+    /** Repositories under `repos/`, optionally restricted to the directory names listed in [includeList] (one per line). */
+    val repos: List<File> = run {
+        val all = File(root, "repos").listFiles { f -> f.isDirectory }?.sortedBy { it.name } ?: emptyList()
+        if (includeList == null) all else {
+            val names = includeList.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toSet()
+            val missing = names - all.map { it.name }.toSet()
+            require(missing.isEmpty()) { "repos listed in $includeList but not cloned: $missing" }
+            all.filter { it.name in names }
+        }
+    }
 
     fun files(): List<Source> = repos.flatMap { repo ->
         repo.walkTopDown()
-            .onEnter { d -> d.name !in EXCLUDED_DIRS && d.name != ".git" }
-            .filter { f -> f.isFile && language.extensions.any { f.name.endsWith(it) } && f.length() in 1..MAX_FILE_BYTES && !isGenerated(f) }
+            .onEnter { d -> d.name !in EXCLUDED_DIRS && d.name != ".git" && !isSymlink(d) }   // cloned repos are untrusted: never follow links out of the tree
+            .filter { f -> f.isFile && !isSymlink(f) && language.extensions.any { f.name.endsWith(it) } && f.length() in 1..MAX_FILE_BYTES && !isGenerated(f) }
             .map { Source(repo.name, it) }
             .toList()
     }
@@ -26,6 +35,8 @@ class Corpus(val root: File, val language: MlLanguage, val splitBy: String = "au
         val h = key.hashCode().toLong() and 0x7fffffffL
         return (h % 100) < testShare
     }
+
+    private fun isSymlink(f: File) = java.nio.file.Files.isSymbolicLink(f.toPath())
 
     private fun isGenerated(f: File): Boolean {
         val n = f.name

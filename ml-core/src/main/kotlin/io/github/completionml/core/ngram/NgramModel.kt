@@ -38,16 +38,55 @@ class NgramModel(
 
     fun logProb(context: IntArray, word: Int): Float = logProb(context, context.size, word)
 
-    /** Scores every candidate id; returns log-probabilities parallel to [candidates]. */
-    fun score(context: IntArray, contextEnd: Int, candidates: IntArray): FloatArray =
-        FloatArray(candidates.size) { logProb(context, contextEnd, candidates[it]) }
+    /**
+     * Fixed-context scorer: hashes of the `order-1` context suffixes and the cumulative backoff weights are computed once,
+     * so scoring a candidate costs at most `order` hash extensions + lookups. Use it whenever several candidates share a context
+     * (a completion list, top-k enumeration).
+     */
+    inner class Scorer(context: IntArray, contextEnd: Int) {
+        private val maxCtx = minOf(order - 1, contextEnd)
+        private val ctxHash = LongArray(maxCtx + 1)           // ctxHash[k] = hash of the last k context tokens
+        private val backoffSum = FloatArray(maxCtx + 1)       // backoffSum[k] = sum of log γ for contexts of length k..1 that exist
 
-    /** Top-[k] next tokens over the whole vocabulary (slow: O(|V|·order); evaluation and debugging only). */
+        init {
+            var h = NgramHash.EMPTY
+            ctxHash[0] = h
+            // build suffix hashes: last k tokens for k = 1..maxCtx; each needs its own chain, so rebuild per k (order ≤ 5: trivial)
+            for (k in 1..maxCtx) ctxHash[k] = NgramHash.of(context, contextEnd - k, contextEnd)
+            // cumulative backoff: falling from k to k-1 adds log γ(ctx_k) if that context exists
+            var acc = 0f
+            backoffSum[maxCtx] = 0f
+            for (k in maxCtx downTo 1) {
+                val b = backoffs.get(ctxHash[k])
+                if (!b.isNaN()) acc += b
+                backoffSum[k - 1] = acc
+            }
+            @Suppress("UNUSED_VALUE") h = 0L
+        }
+
+        fun logProb(word: Int): Float {
+            for (k in maxCtx downTo 0) {
+                val p = probs.get(NgramHash.extend(ctxHash[k], word))
+                if (!p.isNaN()) return p + backoffSum[k]
+            }
+            return UNSEEN + backoffSum[0]
+        }
+
+        fun score(candidates: IntArray): FloatArray = FloatArray(candidates.size) { logProb(candidates[it]) }
+    }
+
+    fun scorer(context: IntArray, contextEnd: Int) = Scorer(context, contextEnd)
+
+    /** Scores every candidate id; returns log-probabilities parallel to [candidates]. */
+    fun score(context: IntArray, contextEnd: Int, candidates: IntArray): FloatArray = Scorer(context, contextEnd).score(candidates)
+
+    /** Top-[k] next tokens over the whole vocabulary (O(|V|·order) lookups; evaluation and debugging only). */
     fun topK(context: IntArray, contextEnd: Int, k: Int, filter: (Int) -> Boolean = { true }): List<Pair<Int, Float>> {
         val best = ArrayList<Pair<Int, Float>>()
+        val scorer = Scorer(context, contextEnd)
         for (w in 0 until vocab.size) {
             if (!filter(w)) continue
-            val p = logProb(context, contextEnd, w)
+            val p = scorer.logProb(w)
             if (best.size < k) { best.add(w to p); if (best.size == k) best.sortByDescending { it.second } }
             else if (p > best.last().second) {
                 best[best.size - 1] = w to p

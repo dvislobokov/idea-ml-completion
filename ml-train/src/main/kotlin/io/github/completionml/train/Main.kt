@@ -23,6 +23,7 @@ usage:
   l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60]
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
   eval-lm --lang .. --data <dir> --lm <lm.cml>      re-evaluate an n-gram model on the test split
+  common: --repos <file>   restrict the corpus to the repo directory names listed in the file (one per line)
   eval-rank --lang .. --data <dir> --lm <lm.cml> --rank <rank.cml> [--max-files N]
       re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
   tokens  --lang .. --file <path>                   dump tokens (lexer debugging)
@@ -56,11 +57,14 @@ private fun parse(a: List<String>): Map<String, String> {
 
 private fun log(s: String) = System.err.println("[%tT] %s".format(System.currentTimeMillis(), s))
 
+private fun corpus(args: Map<String, String>, lang: io.github.completionml.core.spi.MlLanguage) =
+    Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto", includeList = args["repos"]?.let { File(it) })
+
 private fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.tokenizer.tokens(s.file.readText())
 
 private fun trainLm(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val corpus = corpus(args, lang)
     val order = args["order"]?.toInt() ?: 4
     val maxVocab = args["vocab"]?.toInt() ?: 50_000
     val minCounts = (args["min-count"] ?: "1").split(",").map { it.trim().toInt() }.let { l -> IntArray(order) { l.getOrElse(it) { l.last() } } }
@@ -89,7 +93,7 @@ private fun trainLm(args: Map<String, String>) {
 
 private fun evalLm(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val corpus = corpus(args, lang)
     val model = NgramModel.read(File(args.getValue("lm")))
     val test = corpus.files().filter { corpus.isTest(it) }
     evaluateLm(model, corpus, test)
@@ -129,7 +133,7 @@ private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Sour
 
 private fun trainRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val corpus = corpus(args, lang)
     val lm = NgramModel.read(File(args.getValue("lm")))
     val files = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }
     val (test, train) = files.partition { corpus.isTest(it) }
@@ -171,7 +175,7 @@ private fun trainRanker(args: Map<String, String>) {
 
 private fun evalRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto")
+    val corpus = corpus(args, lang)
     val lm = NgramModel.read(File(args.getValue("lm")))
     val ranker = LinearRanker.read(File(args.getValue("rank")))
     val test = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }.filter { corpus.isTest(it) }

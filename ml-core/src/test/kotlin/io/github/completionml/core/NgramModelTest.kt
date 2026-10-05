@@ -48,6 +48,15 @@ class NgramModelTest {
         assertTrue(m.logProb(intArrayOf(v.id("func")), v.id("f")) > m.logProb(intArrayOf(v.id("func")), v.id("return")))
     }
 
+    @Test fun scorerMatchesLogProb() {
+        val m = train(4)
+        val v = m.vocab
+        for (ctx in listOf(intArrayOf(), intArrayOf(v.id("return")), intArrayOf(v.id("zzz"), v.id("{"), v.id("return")), intArrayOf(v.id("func"), v.id("f"), v.id("("), v.id("a")))) {
+            val s = m.scorer(ctx, ctx.size)
+            for (w in 0 until v.size) assertEquals(m.logProb(ctx, w), s.logProb(w), "ctx ${ctx.toList()} word $w")
+        }
+    }
+
     @Test fun roundTripThroughFile() {
         val m = train(4)
         val f = File.createTempFile("lm-test", ".cml").also { it.deleteOnExit() }
