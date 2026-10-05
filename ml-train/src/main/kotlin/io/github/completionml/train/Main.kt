@@ -18,7 +18,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE = """
 usage:
-  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file]
+  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true]
       count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
   l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60]
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
@@ -83,12 +83,14 @@ private fun trainLm(args: Map<String, String>) {
     val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.toInt().coerceAtLeast(1 shl 16))
     for (t in tokenised) trainer.addFile(vocab.encode(t))
     tokenised.clear()
-    val model = trainer.estimate(minCounts) { log(it) }
+    val exact = trainer.estimate(minCounts) { log(it) }
+    val bits = args["fp-bits"]?.toInt() ?: 24
     val out = File(args.getValue("out"))
-    model.write(out, lang.id, "repos=${corpus.repos.joinToString(",") { it.name }}")
-    log("written $out (${out.length() / 1024} KB)")
+    exact.write(out, lang.id, "repos=${corpus.repos.joinToString(",") { it.name }}", bits)
+    log("written $out (${out.length() / 1024} KB, $bits-bit fingerprints, 8-bit values)")
 
-    evaluateLm(model, corpus, test)
+    if (args["eval-exact"] == "true") { log("eval of the exact (unquantised) model:"); evaluateLm(exact, corpus, test) }
+    evaluateLm(NgramModel.read(out), corpus, test)
 }
 
 private fun evalLm(args: Map<String, String>) {

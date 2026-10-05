@@ -1,6 +1,8 @@
 package io.github.completionml.core.ngram
 
 import io.github.completionml.core.format.ModelFormat
+import io.github.completionml.core.util.CompactFloatMap
+import io.github.completionml.core.util.FloatLookup
 import io.github.completionml.core.util.LongFloatMap
 import io.github.completionml.core.util.NgramHash
 import io.github.completionml.core.vocab.Vocabulary
@@ -17,8 +19,8 @@ import kotlin.math.ln
 class NgramModel(
     val order: Int,
     val vocab: Vocabulary,
-    private val probs: LongFloatMap,
-    private val backoffs: LongFloatMap,
+    private val probs: FloatLookup,
+    private val backoffs: FloatLookup,
 ) {
     /** log P(word | context), where [context] holds the preceding ids and the last `order-1` of them are used. */
     fun logProb(context: IntArray, contextEnd: Int, word: Int): Float {
@@ -99,13 +101,23 @@ class NgramModel(
 
     val entryCount get() = probs.size + backoffs.size
 
-    fun write(file: File, language: String, corpusId: String) {
+    /** Writes the model; exact tables are converted to the compact quantised representation ([fingerprintBits] 16..32). */
+    fun write(file: File, language: String, corpusId: String, fingerprintBits: Int = 24) {
         ModelFormat.write(file, ModelFormat.Header("ngram", language, signature(), System.currentTimeMillis(), corpusId)) { out ->
             out.writeInt(order)
             vocab.write(out)
-            writeMap(out, probs)
-            writeMap(out, backoffs)
+            compact(probs, fingerprintBits).write(out)
+            compact(backoffs, fingerprintBits).write(out)
         }
+    }
+
+    /** The same model with compact storage, as a plugin would load it (for measuring quantisation loss without a file). */
+    fun compacted(fingerprintBits: Int = 24) = NgramModel(order, vocab, compact(probs, fingerprintBits), compact(backoffs, fingerprintBits))
+
+    private fun compact(m: FloatLookup, bits: Int): CompactFloatMap = when (m) {
+        is CompactFloatMap -> m
+        is LongFloatMap -> CompactFloatMap.of(m, bits)
+        else -> error("unknown map type")
     }
 
     private fun signature(): Long = order.toLong() * 1_000_003L + vocab.size
@@ -117,21 +129,9 @@ class NgramModel(
         fun read(file: File): NgramModel = ModelFormat.read(file, "ngram") { _, inp ->
             val order = inp.readInt()
             val vocab = Vocabulary.read(inp)
-            val probs = readMap(inp)
-            val backoffs = readMap(inp)
+            val probs = CompactFloatMap.read(inp)
+            val backoffs = CompactFloatMap.read(inp)
             NgramModel(order, vocab, probs, backoffs)
-        }
-
-        private fun writeMap(out: DataOutputStream, m: LongFloatMap) {
-            out.writeInt(m.size)
-            m.forEach { k, v -> out.writeLong(k); out.writeFloat(v) }
-        }
-
-        private fun readMap(inp: DataInputStream): LongFloatMap {
-            val n = inp.readInt()
-            val m = LongFloatMap(n)
-            for (i in 0 until n) m.put(inp.readLong(), inp.readFloat())
-            return m
         }
 
         fun ln(x: Double): Float = kotlin.math.ln(x).toFloat()

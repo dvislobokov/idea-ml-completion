@@ -37,3 +37,21 @@ symlinks inside cloned repos are never followed, `tools/bench/run.sh` runs the s
 | ranker MRR | 0.715 (same) | 0.741 (same) |
 
 (Go file count changed 6738 → 6727: symlinked files are now skipped.)
+
+## e02 — compact model storage: 24-bit fingerprints + 8-bit quantised values (format v2)
+
+`CompactFloatMap`: open addressing keyed by the 64-bit n-gram hash, but a slot stores only a 24-bit fingerprint (the slot
+index fixes the other bits) and an 8-bit value index into 256 quantile bins. On disk: slot delta (varint) + 3 + 1 bytes per
+entry. The exact `LongFloatMap` stays for training; `NgramModel.write` converts. Fingerprint collisions ≈ 1e-7 per lookup.
+
+| metric | Go | C# |
+|---|---|---|
+| LM file, no pruning | 45.1 MB → **18.6 MB** | 46.5 MB → **19.1 MB** |
+| RAM per entry | 12 B × 1.43 → 5 B × 1.43 | same |
+| perplexity exact / compact | 8.3 / 8.3 | 9.9 / 9.9 |
+| top-1 / top-5 exact | 0.335 / 0.522 | 0.304 / 0.487 |
+| top-1 / top-5 compact | 0.333 / 0.522 | 0.303 / 0.487 |
+| ranker MRR (LM feature from compact model) | 0.715 (same) | 0.741 (same) |
+
+Quantisation to 256 bins is lossless for ranking purposes. Combined with `--min-count 1,1,2,2` the model would be ~7–8 MB.
+(Eval time in this run is not comparable: both languages ran concurrently.)

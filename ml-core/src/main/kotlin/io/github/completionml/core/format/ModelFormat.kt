@@ -14,7 +14,7 @@ import java.util.zip.GZIPOutputStream
  */
 object ModelFormat {
     const val MAGIC = "CML1"
-    const val VERSION = 1
+    const val VERSION = 2   // v2: n-gram tables stored as CompactFloatMap (24-bit fingerprints, 8-bit quantised values)
 
     class Header(
         val kind: String,          // "ngram" | "ranker"

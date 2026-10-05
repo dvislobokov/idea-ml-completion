@@ -56,13 +56,13 @@ class LongIntMap(expected: Int = 1024) {
 }
 
 /** Open-addressing hash map Long -> Float. Key 0 reserved. Missing keys read as NaN. */
-class LongFloatMap(expected: Int = 1024) {
+class LongFloatMap(expected: Int = 1024) : FloatLookup {
     var keys = LongArray(capacityFor(expected)); private set
     var values = FloatArray(keys.size); private set
-    var size = 0; private set
+    override var size = 0; private set
     private var mask = keys.size - 1
 
-    fun get(key: Long): Float {
+    override fun get(key: Long): Float {
         var i = slot(key)
         while (true) { val k = keys[i]; if (k == key) return values[i]; if (k == 0L) return Float.NaN; i = (i + 1) and mask }
     }
