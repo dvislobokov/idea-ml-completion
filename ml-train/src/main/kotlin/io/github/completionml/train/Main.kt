@@ -5,6 +5,7 @@ import io.github.completionml.core.lex.Languages
 import io.github.completionml.core.ngram.CacheLm
 import io.github.completionml.core.ngram.MixedLm
 import io.github.completionml.core.ngram.NgramModel
+import io.github.completionml.core.ngram.NgramTable
 import io.github.completionml.core.ngram.TokenLm
 import io.github.completionml.core.ngram.NgramTrainer
 import io.github.completionml.core.ngram.PerplexityAccumulator
@@ -127,7 +128,8 @@ private fun trainLm(args: Map<String, String>) {
     log("vocabulary: ${vocab.size} entries from ${vb.tokens} tokens in ${vb.files} files")
 
     // pass 2: counts (files re-tokenised; grouped by repository so that repo counts are exact)
-    val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1 shl 16), trackRepos = minRepos.any { it > 1 })
+    // initial table sizes: distinct n-grams are a fraction of the tokens; the tables grow (doubling) up to NgramTable.MAX_SLOTS
+    val trainer = NgramTrainer(order, vocab, expectedTokens = (vb.tokens / 4).coerceIn(1L shl 16, NgramTable.MAX_EXPECTED.toLong()).toInt(), trackRepos = minRepos.any { it > 1 })
     val repoIndex = corpus.repos.withIndex().associate { it.value.name to it.index }
     forEachTokenised(corpus, train) { s, t -> trainer.addFile(vocab.encode(t), repoIndex.getValue(s.repo)) }
     log("counted ${trainer.tokens} tokens in ${trainer.files} files")

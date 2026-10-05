@@ -9,7 +9,13 @@ import io.github.completionml.core.util.mix
  * alongside so that suffixes/contexts can be re-hashed during Kneser–Ney estimation. Memory per entry: 8 + 4 + 4·order bytes.
  */
 class NgramTable(val order: Int, expected: Int = 1 shl 16, private val trackRepos: Boolean = false) {
-    private var keys = LongArray(capacityFor(expected))
+    companion object {
+        /** Slots per table: `ids` holds `slots × order` ints and must stay below 2^31 (order ≤ 8). ~188 M distinct n-grams at 70 % load. */
+        const val MAX_SLOTS = 1 shl 28
+        /** Largest `expected` that still fits: pass `minOf(expected, MAX_EXPECTED)` for corpus-sized estimates. */
+        const val MAX_EXPECTED = MAX_SLOTS / 10 * 7 - 1
+    }
+    private var keys = LongArray(capacityFor(minOf(expected, MAX_EXPECTED)))
     private var counts = IntArray(keys.size)
     private var ids = IntArray(keys.size * order)
     // number of distinct repositories an n-gram was seen in (exact when files arrive grouped by repository)
@@ -82,6 +88,7 @@ class NgramTable(val order: Int, expected: Int = 1 shl 16, private val trackRepo
     fun idsRef() = ids
 
     private fun grow() {
+        check(keys.size < MAX_SLOTS) { "n-gram table of order $order exceeds $MAX_SLOTS slots: count a smaller corpus (--repos subset) or shard the counting" }
         val ok = keys; val oc = counts; val oi = ids; val orc = repoCount; val olr = lastRepo
         keys = LongArray(ok.size * 2); counts = IntArray(keys.size); ids = IntArray(keys.size * order); mask = keys.size - 1; size = 0
         if (trackRepos) { repoCount = ShortArray(keys.size); lastRepo = IntArray(keys.size) }

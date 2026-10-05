@@ -21,7 +21,7 @@ import kotlin.math.max
 class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 1 shl 20, trackRepos: Boolean = false) {
     enum class Smoothing { MKN, JM }
 
-    private val tables = Array(order) { n -> NgramTable(n + 1, if (n == 0) vocab.size * 2 else expectedTokens / (order - n), trackRepos) }
+    private val tables = Array(order) { n -> NgramTable(n + 1, if (n == 0) vocab.size * 2 else minOf(expectedTokens / (order - n), NgramTable.MAX_EXPECTED), trackRepos) }
     var tokens = 0L; private set
     var files = 0; private set
 
