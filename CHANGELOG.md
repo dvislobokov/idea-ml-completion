@@ -116,3 +116,21 @@ optimistic, as docs/RESEARCH.md predicted. From here on the standard measurement
 numbers of e01–e04 remain valid for relative comparisons only. The LM-only baseline drops much more (0.72 → 0.55) than the
 ranker (0.77 → 0.71): in-file features carry over to new repositories, the global LM does not — the argument for the cache
 and for project-level counts.
+
+## e06 — smoothing: Jelinek–Mercer vs modified Kneser–Ney, order 4 vs 5
+
+docs/RESEARCH.md reports JM-6 beating KN-3 on Java (Hellendoorn & Devanbu 2017). Checked on our data with the standard
+measurement (repo split, dedup, cache λ=0.3). `--smoothing jm --lambda 0.5`, `--order N`; `tools/bench/std.sh` wraps the
+standard setting.
+
+| variant | Go size | Go ppl | Go top-1/top-5 | Go ranker MRR | C# size | C# ppl | C# top-1/top-5 | C# ranker MRR |
+|---|---|---|---|---|---|---|---|---|
+| MKN order 4 (e05) | 30 MB | **5.5** | 0.440 / 0.682 | 0.712 | 29 MB | **6.9** | 0.371 / 0.639 | 0.720 |
+| JM order 4, λ=0.5 | 29 MB | 6.1 | **0.450** / 0.685 | 0.710 | 28 MB | 7.4 | **0.399** / 0.641 | 0.718 |
+| JM order 5 | 59 MB | 5.5 | 0.446 / 0.688 | 0.713 | 54 MB | 6.9 | 0.380 / 0.644 | 0.718 |
+| MKN order 5 | 61 MB | **5.1** | 0.448 / **0.689** | **0.716** | 56 MB | **6.5** | 0.373 / **0.651** | 0.717 |
+
+Conclusion: with a properly estimated MKN the literature result does not transfer — MKN is 0.5–0.6 perplexity better than
+JM at equal order; JM wins only on identifier top-1 (+1–3 p.p., it spreads less mass to unseen words), which the ranker does
+not convert into MRR. Order 5 buys ~0.4 perplexity for 2× size; worth it only after pruning on the full corpus. Keep MKN-4
+as default; JM stays available (`--smoothing jm`) for the project-level model where counts are small.

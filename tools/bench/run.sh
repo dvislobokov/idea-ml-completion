@@ -9,6 +9,6 @@ out="$data/exp/$tag"; mkdir -p "$out"
 ML="$root/ml-train/build/install/ml-train/bin/ml-train"
 {
   echo "### $lang / $tag  ($(date +%F' '%T))  repos=$(basename "$repos") l2-args: $*"
-  "$ML" l2 --lang "$lang" --data "$data" --repos "$repos" --out "$out/lm.cml" --order 4 "$@" 2>&1 | grep -aE "repos,|vocabulary|model:|written|perplexity|next identifier|done in"
+  "$ML" l2 --lang "$lang" --data "$data" --repos "$repos" --out "$out/lm.cml" "$@" 2>&1 | grep -aE "repos,|vocabulary|model:|written|perplexity|next identifier|done in"
   "$ML" l1 --lang "$lang" --data "$data" --repos "$repos" --lm "$out/lm.cml" --out "$out/rank.cml" --epochs 6 ${L1_ARGS:-} 2>&1 | grep -aE "examples:|^ranker|^baseline: n-gram|inference|done in"
 } | tee "$out/summary.txt"

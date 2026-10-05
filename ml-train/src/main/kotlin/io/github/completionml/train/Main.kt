@@ -21,7 +21,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE = """
 usage:
-  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2] [--cache 0.3]
+  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2] [--cache 0.3] [--smoothing mkn|jm] [--lambda 0.5]
       count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
   l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60] [--cache 0.3]
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
@@ -107,7 +107,9 @@ private fun trainLm(args: Map<String, String>) {
     val repoIndex = corpus.repos.withIndex().associate { it.value.name to it.index }
     for ((i, t) in tokenised.withIndex()) trainer.addFile(vocab.encode(t), repoIndex.getValue(train[i].repo))
     tokenised.clear()
-    val exact = trainer.estimate(minCounts, minRepos) { log(it) }
+    val smoothing = NgramTrainer.Smoothing.valueOf((args["smoothing"] ?: "mkn").uppercase())
+    val exact = trainer.estimate(minCounts, minRepos, smoothing, args["lambda"]?.toDouble() ?: 0.5) { log(it) }
+    log("smoothing: $smoothing" + if (smoothing == NgramTrainer.Smoothing.JM) " λ=${args["lambda"] ?: "0.5"}" else "")
     val bits = args["fp-bits"]?.toInt() ?: 24
     val out = File(args.getValue("out"))
     exact.write(out, lang.id, "repos=${corpus.repos.joinToString(",") { it.name }}", bits)

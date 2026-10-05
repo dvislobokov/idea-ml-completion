@@ -19,6 +19,8 @@ import kotlin.math.max
  * change, the mass of the dropped n-grams flows to the lower order.
  */
 class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 1 shl 20, trackRepos: Boolean = false) {
+    enum class Smoothing { MKN, JM }
+
     private val tables = Array(order) { n -> NgramTable(n + 1, if (n == 0) vocab.size * 2 else expectedTokens / (order - n), trackRepos) }
     var tokens = 0L; private set
     var files = 0; private set
@@ -41,11 +43,17 @@ class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 
      * @param minCounts per order (index = order-1): n-grams with (adjusted) count below the threshold are pruned.
      * @param minRepos per order: n-grams seen in fewer distinct repositories are pruned (needs `trackRepos`).
      */
-    fun estimate(minCounts: IntArray = IntArray(order) { 1 }, minRepos: IntArray = IntArray(order) { 1 }, log: (String) -> Unit = {}): NgramModel {
-        // Adjusted counts: raw for the highest order, continuation counts N1+(• w2..wn) for lower orders,
-        // computed from the full (unpruned) higher-order tables.
-        val adjusted = Array(order) { n -> if (n == order - 1) tables[n] else NgramTable(n + 1, tables[n].size) }
-        for (n in order - 1 downTo 1) {
+    /**
+     * @param smoothing MKN — interpolated modified Kneser–Ney (continuation counts for lower orders);
+     *                  JM — Jelinek–Mercer interpolation of raw relative frequencies with a fixed weight [jmLambda] per order
+     *                  (Hellendoorn & Devanbu 2017 found JM better than MKN on source code).
+     */
+    fun estimate(minCounts: IntArray = IntArray(order) { 1 }, minRepos: IntArray = IntArray(order) { 1 },
+                 smoothing: Smoothing = Smoothing.MKN, jmLambda: Double = 0.5, log: (String) -> Unit = {}): NgramModel {
+        // MKN: raw counts for the highest order, continuation counts N1+(• w2..wn) for lower orders (from the full,
+        // unpruned higher-order tables). JM: raw counts everywhere.
+        val adjusted = Array(order) { n -> if (n == order - 1 || smoothing == Smoothing.JM) tables[n] else NgramTable(n + 1, tables[n].size) }
+        if (smoothing == Smoothing.MKN) for (n in order - 1 downTo 1) {
             tables[n].forEach { _, _, ids, off -> adjusted[n - 1].add(ids, off + 1) }   // suffix of length n
             log("order $n: ${adjusted[n - 1].size} continuation n-grams (order ${n + 1}: ${tables[n].size})")
         }
@@ -55,8 +63,8 @@ class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 
         for (n in 1..order) {
             val table = adjusted[n - 1]
             val raw = tables[n - 1]
-            val d = discounts(table)
-            log("order $n discounts: D1=%.3f D2=%.3f D3+=%.3f".format(d[0], d[1], d[2]))
+            val d = if (smoothing == Smoothing.MKN) discounts(table) else doubleArrayOf(0.0, 0.0, 0.0)
+            if (smoothing == Smoothing.MKN) log("order $n discounts: D1=%.3f D2=%.3f D3+=%.3f".format(d[0], d[1], d[2]))
             // per-context totals and N1/N2/N3+ counts over the full adjusted counts
             val total = LongIntMap(table.size / 2 + 16)
             val n1 = LongIntMap(table.size / 2 + 16)
@@ -69,7 +77,7 @@ class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 
             }
             // full-count backoff weights γ(h) = (D1·N1 + D2·N2 + D3·N3+) / C(h)
             val gammaFull = LongFloatMap(total.size)
-            total.forEach { ctx, t -> gammaFull.put(ctx, ((d[0] * n1.get(ctx) + d[1] * n2.get(ctx) + d[2] * n3.get(ctx)) / t).toFloat()) }
+            total.forEach { ctx, t -> gammaFull.put(ctx, if (smoothing == Smoothing.JM) jmLambda.toFloat() else ((d[0] * n1.get(ctx) + d[1] * n2.get(ctx) + d[2] * n3.get(ctx)) / t).toFloat()) }
             // lower-order model view (orders < n are final, including their pruning); its order limits the context it uses
             val lower = if (n == 1) null else NgramModel(n - 1, vocab, probs, backoffs)
             val minCount = minCounts[n - 1]; val minRepo = minRepos[n - 1]
@@ -83,7 +91,7 @@ class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 
                 val disc = when { c == 1 -> d[0]; c == 2 -> d[1]; else -> d[2] }
                 val word = ids[off + n - 1]
                 val pl = if (lower == null) 1.0 / vocabSize else exp(lower.logProb(ids, off + n - 1, word).toDouble())
-                val p = max(c - disc, 0.0) / t + gammaFull.get(ctx) * pl
+                val p = if (smoothing == Smoothing.JM) (1 - jmLambda) * c / t + jmLambda * pl else max(c - disc, 0.0) / t + gammaFull.get(ctx) * pl
                 val keep = !pruning || (c >= minCount && (minRepo <= 1 || raw.reposOf(h) >= minRepo))
                 if (keep) {
                     probs.put(h, ln(p).toFloat()); kept++
