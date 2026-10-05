@@ -40,12 +40,14 @@ class LinearRanker(
     }
 
     companion object {
-        fun read(file: File): LinearRanker = ModelFormat.read(file, "ranker") { header, inp ->
+        fun read(file: File): LinearRanker = read(file.inputStream(), file.toString())
+
+        fun read(stream: java.io.InputStream, name: String = "ranker model"): LinearRanker = ModelFormat.read(stream, "ranker", { header, inp ->
             val n = inp.readInt()
             val schema = FeatureSchema(List(n) { inp.readUTF() })
-            require(schema.hash == header.schemaHash) { "$file: schema hash mismatch" }
+            require(schema.hash == header.schemaHash) { "$name: schema hash mismatch" }
             LinearRanker(schema, FloatArray(n) { inp.readFloat() }, FloatArray(n) { inp.readFloat() }, FloatArray(n) { inp.readFloat() })
-        }
+        }, name)
     }
 }
 

@@ -126,13 +126,15 @@ class NgramModel(
         /** Log-probability for a token whose unigram was never seen (outside vocabulary and no `<ID>` fallback). */
         const val UNSEEN = -20f
 
-        fun read(file: File): NgramModel = ModelFormat.read(file, "ngram") { _, inp ->
+        fun read(file: File): NgramModel = read(file.inputStream(), file.toString())
+
+        fun read(stream: java.io.InputStream, name: String = "ngram model"): NgramModel = ModelFormat.read(stream, "ngram", { _, inp ->
             val order = inp.readInt()
             val vocab = Vocabulary.read(inp)
             val probs = CompactFloatMap.read(inp)
             val backoffs = CompactFloatMap.read(inp)
             NgramModel(order, vocab, probs, backoffs)
-        }
+        }, name)
 
         fun ln(x: Double): Float = kotlin.math.ln(x).toFloat()
     }

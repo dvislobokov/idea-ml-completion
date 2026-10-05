@@ -40,13 +40,17 @@ object ModelFormat {
     }
 
     fun <T> read(file: File, expectedKind: String, body: (Header, DataInputStream) -> T): T =
-        DataInputStream(BufferedInputStream(GZIPInputStream(file.inputStream()), 1 shl 16)).use { inp ->
+        read(file.inputStream(), expectedKind, body, file.toString())
+
+    /** Reads a model from a gzip stream (a bundled plugin resource, for instance); [name] is for error messages. The stream is closed. */
+    fun <T> read(stream: java.io.InputStream, expectedKind: String, body: (Header, DataInputStream) -> T, name: String = "model"): T =
+        DataInputStream(BufferedInputStream(GZIPInputStream(stream), 1 shl 16)).use { inp ->
             val magic = ByteArray(4).also { inp.readFully(it) }.toString(Charsets.US_ASCII)
-            require(magic == MAGIC) { "$file: not a .cml model (magic '$magic')" }
+            require(magic == MAGIC) { "$name: not a .cml model (magic '$magic')" }
             val version = inp.readInt()
-            require(version == VERSION) { "$file: model format $version, this build reads $VERSION; retrain" }
+            require(version == VERSION) { "$name: model format $version, this build reads $VERSION; retrain" }
             val header = Header(inp.readUTF(), inp.readUTF(), inp.readLong(), inp.readLong(), inp.readUTF(), version)
-            require(header.kind == expectedKind) { "$file: model kind '${header.kind}', expected '$expectedKind'" }
+            require(header.kind == expectedKind) { "$name: model kind '${header.kind}', expected '$expectedKind'" }
             body(header, inp)
         }
 }
