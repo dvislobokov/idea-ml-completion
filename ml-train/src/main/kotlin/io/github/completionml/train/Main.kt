@@ -27,6 +27,9 @@ usage:
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
   eval-lm --lang .. --data <dir> --lm <lm.cml>      re-evaluate an n-gram model on the test split
   common: --repos <file>   restrict the corpus to the repo directory names listed in the file (one per line)
+          --dedup 0.8      drop exact duplicates and near-duplicates (MinHash Jaccard over identifiers >= value), train first then test
+          --split repo|file  force the split (auto: by repo when >= 20 repos, else by file)
+          --test-repos a__b,c__d   hold out exactly these repositories (directory names)
   eval-rank --lang .. --data <dir> --lm <lm.cml> --rank <rank.cml> [--max-files N]
       re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
   tokens  --lang .. --file <path>                   dump tokens (lexer debugging)
@@ -61,9 +64,25 @@ private fun parse(a: List<String>): Map<String, String> {
 private fun log(s: String) = System.err.println("[%tT] %s".format(System.currentTimeMillis(), s))
 
 private fun corpus(args: Map<String, String>, lang: io.github.completionml.core.spi.MlLanguage) =
-    Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto", includeList = args["repos"]?.let { File(it) })
+    Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto", includeList = args["repos"]?.let { File(it) },
+           testRepos = args["test-repos"]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: emptySet())
 
 private fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.tokenizer.tokens(s.file.readText())
+
+/** Tokenised train/test files; with `--dedup <jaccard>` exact and near duplicates are dropped (train first, then test). */
+class Loaded(val train: List<Pair<Corpus.Source, List<MlToken>>>, val test: List<Pair<Corpus.Source, List<MlToken>>>)
+
+private fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = null): Loaded {
+    val files = corpus.files().let { f -> maxFiles?.let { f.take(it) } ?: f }
+    val (testSrc, trainSrc) = files.partition { corpus.isTest(it) }
+    val dedup = args["dedup"]?.toDouble()?.let { Dedup(it) }
+    fun take(list: List<Corpus.Source>) = list.mapNotNull { s -> val t = readTokens(corpus, s); if (dedup == null || dedup.offer(t)) s to t else null }
+    val train = take(trainSrc); val test = take(testSrc)
+    log("${corpus.language.id}: ${corpus.repos.size} repos, ${files.size} files (train ${trainSrc.size}, test ${testSrc.size}), split by ${if (corpus.repos.size >= 20 && corpus.splitBy == "auto") "repo" else corpus.splitBy}")
+    if (dedup != null) log("$dedup -> train ${train.size}, test ${test.size}")
+    log("test repos: ${testSrc.map { it.repo }.distinct().sorted()}")
+    return Loaded(train, test)
+}
 
 private fun trainLm(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
@@ -72,14 +91,14 @@ private fun trainLm(args: Map<String, String>) {
     val maxVocab = args["vocab"]?.toInt() ?: 50_000
     fun perOrder(key: String) = (args[key] ?: "1").split(",").map { it.trim().toInt() }.let { l -> IntArray(order) { l.getOrElse(it) { l.last() } } }
     val minCounts = perOrder("min-count"); val minRepos = perOrder("min-repos")
-    val files = corpus.files()
-    val (test, train) = files.partition { corpus.isTest(it) }
-    log("${lang.id}: ${corpus.repos.size} repos, ${files.size} files (train ${train.size}, test ${test.size}), order $order")
+    val loaded = load(corpus, args)
+    val train = loaded.train.map { it.first }; val test = loaded.test
+    log("order $order")
 
     // pass 1: vocabulary
     val vb = Vocabulary.Builder()
     val tokenised = ArrayList<List<MlToken>>(train.size)
-    for (s in train) { val t = readTokens(corpus, s); tokenised.add(t); vb.addFile(t) }
+    for ((_, t) in loaded.train) { tokenised.add(t); vb.addFile(t) }
     val vocab = vb.build(maxVocab, minDocFreq = if (corpus.repos.size >= 20) 2 else 1)
     log("vocabulary: ${vocab.size} entries from ${vb.tokens} tokens in ${vb.files} files")
 
@@ -103,19 +122,17 @@ private fun evalLm(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
     val corpus = corpus(args, lang)
     val model = NgramModel.read(File(args.getValue("lm")))
-    val test = corpus.files().filter { corpus.isTest(it) }
-    evaluateLm(model, corpus, test, args["cache"]?.toDouble() ?: 0.0)
+    evaluateLm(model, corpus, load(corpus, args).test, args["cache"]?.toDouble() ?: 0.0)
 }
 
 /** Perplexity over all tokens; next-token top-1/top-5 over identifiers that are in the vocabulary (what gray text could predict). */
-private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Source>, cacheLambda: Double = 0.0) {
+private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Pair<Corpus.Source, List<MlToken>>>, cacheLambda: Double = 0.0) {
     val ppAll = PerplexityAccumulator(); val ppIdent = PerplexityAccumulator()
     var identPositions = 0L; var top1 = 0L; var top5 = 0L; var oov = 0L; var scored = 0L
     val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
     val t0 = System.currentTimeMillis()
     val vocab = model.vocab
-    for (s in test) {
-        val tokens = readTokens(corpus, s)
+    for ((_, tokens) in test) {
         val ids = vocab.encode(tokens)
         val padded = IntArray(ids.size + model.order - 1) { if (it < model.order - 1) Vocabulary.BOS_ID else ids[it - model.order + 1] }
         val cache = if (cacheLambda > 0) CacheLm(3, vocab.size) else null
@@ -165,14 +182,13 @@ private fun trainRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
     val corpus = corpus(args, lang)
     val lm = NgramModel.read(File(args.getValue("lm")))
-    val files = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }
-    val (test, train) = files.partition { corpus.isTest(it) }
+    val loaded = load(corpus, args, args["max-files"]?.toInt())
     val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0)
     val schema = gen.schema()
-    log("${lang.id}: generating examples from ${train.size} train / ${test.size} test files, ${schema.size} features")
+    log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
     val trainEx = ArrayList<TrainingExample>(); val testEx = ArrayList<TrainingExample>()
-    for (s in train) gen.generate(readTokens(corpus, s)) { trainEx.add(it) }
-    for (s in test) gen.generate(readTokens(corpus, s)) { testEx.add(it) }
+    for ((_, t) in loaded.train) gen.generate(t) { trainEx.add(it) }
+    for ((_, t) in loaded.test) gen.generate(t) { testEx.add(it) }
     log("examples: train ${trainEx.size}, test ${testEx.size}, avg candidates %.1f".format(trainEx.sumOf { it.size }.toDouble() / trainEx.size.coerceAtLeast(1)))
 
     val trainer = LinearRankerTrainer(schema, l2 = args["l2"]?.toDouble() ?: 1e-4, learningRate = args["lr"]?.toDouble() ?: 0.1, epochs = args["epochs"]?.toInt() ?: 10)
@@ -208,13 +224,13 @@ private fun evalRanker(args: Map<String, String>) {
     val corpus = corpus(args, lang)
     val lm = NgramModel.read(File(args.getValue("lm")))
     val ranker = LinearRanker.read(File(args.getValue("rank")))
-    val test = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }.filter { corpus.isTest(it) }
+    val test = load(corpus, args, args["max-files"]?.toInt()).test
     val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0)
     require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
     val m = RankMetrics(); val base = RankMetrics()
     val lmIdx = FeatureSchema.BASE.indexOf("lm_logprob")
     var n = 0
-    for (s in test) gen.generate(readTokens(corpus, s)) { ex ->
+    for ((_, t) in test) gen.generate(t) { ex ->
         n++
         m.add(ex, ranker.scores(ex))
         base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) })

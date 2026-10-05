@@ -95,3 +95,24 @@ This is the "localness of software" component (Tu, Su & Devanbu 2014); the IDE w
 Largest gain of all experiments so far, at zero model size and ~1 µs per token of bookkeeping. λ=0.5 is better for the raw LM,
 λ=0.3 for the ranker; keep 0.3 as default and tune λ per project later (plan §6, EM on held-out files). Decay of old cache
 entries and a project-level cache (Hellendoorn's nested cache) are the obvious next steps (see docs/RESEARCH.md §1, §7).
+
+## e05 — corpus deduplication and repository-level split (honest evaluation)
+
+`Dedup`: exact duplicates by token-sequence hash, near-duplicates by MinHash/LSH over the identifier set (Jaccard ≥ 0.8,
+Allamanis 2019); offered train-first, so test files that duplicate training files are dropped. `--test-repos` holds out
+explicit repositories; `--split repo` uses the hash split. All runs with cache λ=0.3.
+
+| setting | Go files train/test | Go ppl | Go top-1/top-5 | Go OOV | Go ranker MRR | C# ppl | C# top-1/top-5 | C# OOV | C# ranker MRR |
+|---|---|---|---|---|---|---|---|---|---|
+| base13, file split, no dedup (e04) | 6031 / 696 | 5.0 | 0.471 / 0.707 | 8.8 % | 0.773 | 5.8 | 0.443 / 0.670 | 17.5 % | 0.779 |
+| base13, file split, dedup 0.8 | 5720 / 664 | 5.0 | 0.464 / 0.703 | 8.9 % | 0.770 | 6.0 | 0.436 / 0.661 | 18.4 % | 0.772 |
+| all repos (33 Go / 15 C#), **repo split**, dedup | 16553 / 1719 | 5.5 | 0.440 / 0.682 | **29.4 %** | **0.712** | 6.9 | 0.371 / 0.639 | **26.5 %** | **0.720** |
+
+Held-out repos: Go — caddy, etcd, esbuild, v2ray-core (hash split); C# — Flow.Launcher, Newtonsoft.Json (explicit).
+
+Findings: (1) near-duplicates are rare in these curated repos (5 % of files) and barely move the metrics; (2) the split
+matters a lot — unseen repositories triple the identifier OOV rate and cost ~0.06 MRR; the file split numbers were
+optimistic, as docs/RESEARCH.md predicted. From here on the standard measurement is **repo split + dedup**; file-split
+numbers of e01–e04 remain valid for relative comparisons only. The LM-only baseline drops much more (0.72 → 0.55) than the
+ranker (0.77 → 0.71): in-file features carry over to new repositories, the global LM does not — the argument for the cache
+and for project-level counts.

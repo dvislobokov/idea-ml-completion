@@ -7,7 +7,9 @@ import java.io.File
  * Source files of a language under `<data>/repos/<owner>__<repo>/...`, with generated/vendored files dropped and a
  * deterministic train/test split (by repository when there are enough of them, otherwise by file hash).
  */
-class Corpus(val root: File, val language: MlLanguage, val splitBy: String = "auto", val testShare: Int = 10, includeList: File? = null) {
+class Corpus(val root: File, val language: MlLanguage, val splitBy: String = "auto", val testShare: Int = 10, includeList: File? = null,
+             /** explicit held-out repositories (directory names); overrides the hash split */
+             val testRepos: Set<String> = emptySet()) {
     class Source(val repo: String, val file: File)
 
     /** Repositories under `repos/`, optionally restricted to the directory names listed in [includeList] (one per line). */
@@ -30,6 +32,7 @@ class Corpus(val root: File, val language: MlLanguage, val splitBy: String = "au
     }
 
     fun isTest(s: Source): Boolean {
+        if (testRepos.isNotEmpty()) return s.repo in testRepos
         val by = if (splitBy == "auto") (if (repos.size >= 20) "repo" else "file") else splitBy
         val key = if (by == "repo") s.repo else s.repo + "/" + s.file.relativeTo(root).path.replace('\\', '/')
         val h = key.hashCode().toLong() and 0x7fffffffL
