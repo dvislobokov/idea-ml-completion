@@ -239,3 +239,27 @@ Counting 349 M tokens takes 5 min, 23 GB peak; LM evaluation 80 s on 3664 files 
 Ranker on the full corpus: 731 k training lists (`PER_FILE=10`), LM-only baseline 0.575. Repository-count pruning, which hurt
 on 19 repositories (e03), now improves identifier top-1 by 1 p.p. while cutting the model 8×: project-specific n-grams only
 add noise on unseen code. Recommended plugin model: the 20 MB variant. Report in Russian: `docs/REPORT-GO-RU.md`.
+
+## e12 — full C# corpus on the server (472 repositories), Go order 5 with repository pruning
+
+Same recipe as e11 (`tools/server/train.sh`, `PER_FILE=10`, 30 held-out repositories per language, cross-fitted folds).
+
+| C# LM (MKN-4, cache λ=0.3) | n-grams | size | ppl | OOV | top-1 / top-5 | proxy ranker MRR / top-1 / top-5 | LM-only MRR |
+|---|---|---|---|---|---|---|---|
+| local, 10 repos (e07) | — | 29 MB | 6.9 | 26.5 % | 0.371 / 0.639 | 0.723 / 0.606 / 0.871 (2 held-out repos) | 0.530 |
+| server, 472 repos, no pruning | 27.4 M | 162 MB | 5.9 | 32.9 % | 0.380 / 0.620 | 0.718 / 0.599 / 0.868 | 0.501 |
+| `--min-count 1,1,2,2 --min-repos 1,1,1,3` | 5.9 M | 35 MB | 6.2 | 32.9 % | 0.387 / 0.618 | 0.713 / 0.593 / 0.864 | 0.497 |
+| `--min-count 1,1,3,3 --min-repos 1,1,2,5` | 3.5 M | 20 MB | 6.4 | 32.9 % | 0.388 / 0.615 | 0.712 / 0.593 / 0.862 | 0.496 |
+
+C# corpus: 310 M tokens in 383 k files after dedup (470 k before: 7 % duplicates, more generated code than in Go). The 30 held-out
+C# repositories are harder than the two local ones (OOV 33 % vs 27 %), so the absolute numbers are not comparable with e07; the
+server LM-only baseline is 0.50 against 0.53 locally for the same reason. Unlike Go, repository pruning costs C# 0.3–0.5 perplexity
+and 0.006 MRR; still, 20 MB at −0.006 MRR is the plugin candidate. 111 k test lists.
+
+| Go LM | size | ppl | top-1 / top-5 | proxy ranker MRR / top-1 / top-5 |
+|---|---|---|---|---|
+| order 4, `--min-count 1,1,3,3 --min-repos 1,1,2,5` (e11) | 20 MB | 5.1 | 0.481 / 0.727 | 0.737 / 0.627 / 0.873 |
+| **order 5, `--min-count 1,1,3,3,3 --min-repos 1,1,2,5,5`** | 27 MB | **4.7** | **0.497 / 0.738** | **0.742 / 0.636 / 0.874** |
+
+Order 5 with the same pruning is the best Go model so far: −0.4 perplexity, +1.6 p.p. top-1, +0.005 MRR for 7 MB more. On the
+19-repository local corpus order 5 was not worth its size (e06); on 580 repositories it is. Recommended Go plugin LM: order 5, 27 MB.
