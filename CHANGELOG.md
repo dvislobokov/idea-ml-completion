@@ -186,3 +186,30 @@ Preparation for the PSI-based generators in the plugins (docs/ADAPTER.md):
 
 Regression: proxy ranker on the C# standard folds reproduces e07 exactly (MRR 0.723, top-1 0.606); training from the dumped
 shards gives the same numbers. 17 unit tests green.
+
+## e10 — first ranker on real Go completion lists (PSI candidates from the plugin)
+
+The Go plugin now embeds this repository as a subtree and exports examples with its real completion
+(`idea-golang-support`: `go-psi-ide/.../ml/GoMlFeatures.kt`, `GoMlDatasetExport`, `./gradlew :go-psi-ide:mlDataset`; parity test
+`GoMlFeatureParityTest`). Language block: 17 features (candidate kind groups, scope level, needs import, expected-type match,
+declared in file + distance, the plugin's deterministic order as `rule_rank_log`). Export cost 30–160 ms per position
+(bigger repositories are slower: more package-level declarations to resolve). Candidate recall of the plugin, i.e. the share of
+positions whose real identifier is in the list at all (positions where the plugin shows no list — declaration names etc. — excluded):
+88–92 % per repository.
+
+Local run: ranker fold = 7 repositories, 200 files each, 20 positions per file → 11 943 lists; held-out = caddy, etcd, esbuild,
+v2ray-core → 7 811 lists, 49 candidates on average. LM from the lm fold (e07), cache λ=0.3, cross-fitted.
+
+| order of the list | top-1 | top-5 | MRR |
+|---|---|---|---|
+| plugin rules (expected type → scope level → name) | 0.394 | 0.699 | 0.534 |
+| n-gram LM only | 0.342 | 0.532 | 0.439 |
+| most frequent in file | 0.353 | 0.727 | 0.516 |
+| **ML ranker (linear, 210 weights)** | **0.675** | **0.919** | **0.783** |
+
+Per context kind the ranker is 0.735 (after `.`) … 0.812 (statement start) MRR; the rules are weakest after `.` (0.378: same-level members
+are ordered by name) and in type positions (0.407). Heaviest weights: exact-case prefix match, declared in this file, scope level,
+needs import, keyword kind (negative). Caveat: `rule_rank_log` reproduces the plugin's weigher but not the platform's prefix/proximity
+weighers that follow it, so the "rules" row is slightly pessimistic. Known gaps: one repository exported 0 lists (headscale: no
+`go.mod` at the root, to check); near-duplicate repositories across folds (v2fly/v2ray-core vs v2ray/v2ray-core — excluded from
+training) call for dedup at the shard level too.
