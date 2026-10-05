@@ -17,6 +17,7 @@ import io.github.completionml.core.spi.MlToken
 import io.github.completionml.core.spi.TokenKind
 import io.github.completionml.core.vocab.Vocabulary
 import java.io.File
+import kotlin.math.ln
 import kotlin.system.exitProcess
 
 private const val USAGE = """
@@ -76,7 +77,10 @@ class Loaded(val train: List<Pair<Corpus.Source, List<MlToken>>>, val test: List
 
 private fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = null): Loaded {
     val files = corpus.files().let { f -> maxFiles?.let { f.take(it) } ?: f }
-    val (testSrc, trainSrc) = files.partition { corpus.isTest(it) }
+    val (testAll, trainSrc) = files.partition { corpus.isTest(it) }
+    val maxTest = args["max-test-files"]?.toInt()
+    val testSrc = if (maxTest == null || testAll.size <= maxTest) testAll
+                  else { val step = testAll.size.toDouble() / maxTest; List(maxTest) { testAll[(it * step).toInt()] } }
     val dedup = args["dedup"]?.toDouble()?.let { Dedup(it) }
     fun take(list: List<Corpus.Source>) = list.mapNotNull { s -> val t = readTokens(corpus, s); if (dedup == null || dedup.offer(t)) s to t else null }
     val train = take(trainSrc); val test = take(testSrc)
@@ -129,14 +133,23 @@ private fun evalLm(args: Map<String, String>) {
     evaluateLm(model, corpus, load(corpus, args).test, args["cache"]?.toDouble() ?: 0.0)
 }
 
+/** Per-file evaluation result; files are independent (the cache is per file), so they are evaluated in parallel. */
+private class LmFileStats {
+    var tokens = 0L; var sumAll = 0.0; var identTokens = 0L; var sumIdent = 0.0
+    var identPositions = 0L; var top1 = 0L; var top5 = 0L; var oov = 0L; var scored = 0L
+    fun add(o: LmFileStats) {
+        tokens += o.tokens; sumAll += o.sumAll; identTokens += o.identTokens; sumIdent += o.sumIdent
+        identPositions += o.identPositions; top1 += o.top1; top5 += o.top5; oov += o.oov; scored += o.scored
+    }
+}
+
 /** Perplexity over all tokens; next-token top-1/top-5 over identifiers that are in the vocabulary (what gray text could predict). */
 private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Pair<Corpus.Source, List<MlToken>>>, cacheLambda: Double = 0.0) {
-    val ppAll = PerplexityAccumulator(); val ppIdent = PerplexityAccumulator()
-    var identPositions = 0L; var top1 = 0L; var top5 = 0L; var oov = 0L; var scored = 0L
-    val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
     val t0 = System.currentTimeMillis()
     val vocab = model.vocab
-    for ((_, tokens) in test) {
+    val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
+    val stats = test.parallelStream().map { (_, tokens) ->
+        val st = LmFileStats()
         val ids = vocab.encode(tokens)
         val padded = IntArray(ids.size + model.order - 1) { if (it < model.order - 1) Vocabulary.BOS_ID else ids[it - model.order + 1] }
         val cache = if (cacheLambda > 0) CacheLm(3, vocab.size) else null
@@ -144,25 +157,29 @@ private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Pair<Corpus
         for (i in ids.indices) {
             val pos = i + model.order - 1
             val lp = lm.logProb(padded, pos, ids[i])
-            ppAll.add(lp)
+            st.tokens++; st.sumAll += lp
             if (tokens[i].kind == TokenKind.IDENT) {
-                identPositions++
-                if (ids[i] == Vocabulary.UNK_ID) { oov++; cache?.add(ids[i]); continue }
-                ppIdent.add(lp)
-                if (identPositions % sampleEvery == 0L) {
-                    scored++
+                st.identPositions++
+                if (ids[i] == Vocabulary.UNK_ID) { st.oov++; cache?.add(ids[i]); continue }
+                st.identTokens++; st.sumIdent += lp
+                if (st.identPositions % sampleEvery == 0L) {
+                    st.scored++
                     val top = if (cache == null) model.topK(padded, pos, 5) { vocab.isIdentifier(it) && it != Vocabulary.UNK_ID }
                               else topKMixed(model, cache, cacheLambda, padded, pos, 5) { vocab.isIdentifier(it) && it != Vocabulary.UNK_ID }
-                    if (top.isNotEmpty() && top[0].first == ids[i]) top1++
-                    if (top.any { it.first == ids[i] }) top5++
+                    if (top.isNotEmpty() && top[0].first == ids[i]) st.top1++
+                    if (top.any { it.first == ids[i] }) st.top5++
                 }
             }
             cache?.add(ids[i])
         }
-    }
+        st
+    }.reduce(LmFileStats()) { x, y -> LmFileStats().also { it.add(x); it.add(y) } }
+    val ppAll = kotlin.math.exp(-stats.sumAll / stats.tokens.coerceAtLeast(1))
+    val bits = -stats.sumAll / stats.tokens.coerceAtLeast(1) / ln(2.0)
+    val ppIdent = kotlin.math.exp(-stats.sumIdent / stats.identTokens.coerceAtLeast(1))
     log("LM eval on ${test.size} files%s: perplexity all=%.1f (%.2f bits), identifiers in vocab=%.1f; identifier OOV rate=%.1f%%".format(
-        if (cacheLambda > 0) " (cache λ=$cacheLambda)" else "", ppAll.perplexity, ppAll.entropyBits, ppIdent.perplexity, 100.0 * oov / identPositions.coerceAtLeast(1)))
-    log("next identifier (sampled %d positions, in-vocab): top1=%.3f top5=%.3f; %.1f s".format(scored, top1.toDouble() / scored.coerceAtLeast(1), top5.toDouble() / scored.coerceAtLeast(1), (System.currentTimeMillis() - t0) / 1000.0))
+        if (cacheLambda > 0) " (cache λ=$cacheLambda)" else "", ppAll, bits, ppIdent, 100.0 * stats.oov / stats.identPositions.coerceAtLeast(1)))
+    log("next identifier (sampled %d positions, in-vocab): top1=%.3f top5=%.3f; %.1f s".format(stats.scored, stats.top1.toDouble() / stats.scored.coerceAtLeast(1), stats.top5.toDouble() / stats.scored.coerceAtLeast(1), (System.currentTimeMillis() - t0) / 1000.0))
 }
 
 /** Top-k over the vocabulary for the cache mixture: global scores via the fixed-context Scorer, cache probabilities on top. */

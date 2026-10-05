@@ -158,3 +158,16 @@ training repos), ranker on `sets/rank.txt` (the other 1/3), both evaluated on th
 The ranker trained on 1/3 of the repositories with a smaller LM matches or beats the leaky full-data one — data volume is
 not the bottleneck for L1 (as docs/RESEARCH.md says: features are). Cross-fitting is now mandatory for the server recipe;
 the real PSI features (expected type, kind, scope) are the next lever, and they need the plugin adapters.
+
+## e08 — parallel LM evaluation, `--max-test-files`, server runbook
+
+Evaluation of the LM now runs per file in parallel (`parallelStream`; the cache LM is per file, so files are independent) —
+C# test set 190 s → 21 s on 8 cores, perplexity identical. The top-k sample is now taken per file (every 20th in-vocabulary
+identifier of each file) instead of globally, so the sampled positions differ from e01–e07: C# e05 LM reads top-1 0.357 /
+top-5 0.643 under the new sampling (was 0.371 / 0.639); compare top-1/top-5 only within one sampling scheme from now on.
+`--max-test-files N` stride-samples the test files, keeping every held-out repository represented, to bound evaluation time
+on the full corpus.
+
+`tools/server/` — runbook for a 24-core / 64 GB Linux box: `setup.sh` (JDK 21, build, environment report), `fetch.sh`
+(both corpora, resumable), `stats.sh`, `sets.sh` (deterministic test / lm / rank repository folds), `train.sh <lang> <tag>
+[l2 args]` (standard measurement, logs and `summary.txt` per experiment), `report.sh`. See `tools/server/README.md`.
