@@ -5,7 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.jvm") version "2.3.21" apply false
 }
 
-subprojects {
+// ml-core configures itself (it is embedded into the plugins as a subtree); the rest of the modules are configured here.
+configure(subprojects.filter { it.name != "ml-core" }) {
     apply(plugin = "org.jetbrains.kotlin.jvm")
     group = "io.github.completionml"
     version = "0.1.0"
