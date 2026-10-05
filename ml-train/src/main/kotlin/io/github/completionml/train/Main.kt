@@ -8,6 +8,7 @@ import io.github.completionml.core.ngram.NgramModel
 import io.github.completionml.core.ngram.TokenLm
 import io.github.completionml.core.ngram.NgramTrainer
 import io.github.completionml.core.ngram.PerplexityAccumulator
+import io.github.completionml.core.rank.ExampleShards
 import io.github.completionml.core.rank.FeatureSchema
 import io.github.completionml.core.rank.LinearRanker
 import io.github.completionml.core.rank.LinearRankerTrainer
@@ -25,6 +26,7 @@ usage:
   l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2] [--cache 0.3] [--smoothing mkn|jm] [--lambda 0.5]
       count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
   l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60] [--cache 0.3] [--features 8]
+                                      [--dump-shards <dir>] | --shards <dir> [--test-shards <dir>]  (train on plugin-generated shards)
       NOTE: train the LM on repositories disjoint from the ranker's training repositories (--repos lists), otherwise the
       LM feature is inflated on the ranker's training data and the ranker over-trusts it on unseen projects.
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
@@ -33,7 +35,7 @@ usage:
           --dedup 0.8      drop exact duplicates and near-duplicates (MinHash Jaccard over identifiers >= value), train first then test
           --split repo|file  force the split (auto: by repo when >= 20 repos, else by file)
           --test-repos a__b,c__d   hold out exactly these repositories (directory names)
-  eval-rank --lang .. --data <dir> --lm <lm.cml> --rank <rank.cml> [--max-files N]
+  eval-rank --lang .. --rank <rank.cml> (--data <dir> --lm <lm.cml> [--max-files N] | --shards <dir>)
       re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
   tokens  --lang .. --file <path>                   dump tokens (lexer debugging)
 """
@@ -201,26 +203,45 @@ private fun topKMixed(model: NgramModel, cache: CacheLm, lambda: Double, ctx: In
 
 private fun trainRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = corpus(args, lang)
-    val lm = NgramModel.read(File(args.getValue("lm")))
-    val loaded = load(corpus, args, args["max-files"]?.toInt())
-    val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0,
-                                    baseCount = args["features"]?.toInt() ?: FeatureSchema.BASE.size)
-    val schema = gen.schema()
-    log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
     val trainEx = ArrayList<TrainingExample>(); val testEx = ArrayList<TrainingExample>()
-    for ((_, t) in loaded.train) gen.generate(t) { trainEx.add(it) }
-    for ((_, t) in loaded.test) gen.generate(t) { testEx.add(it) }
+    val schema: FeatureSchema
+    val source: String
+    if (args["shards"] != null) {
+        // examples produced by a plugin-side generator (real PSI candidates and features)
+        val (header, _) = ExampleShards.readAll(File(args.getValue("shards")), trainEx) { log("train $it") }
+        require(header.language == lang.id) { "shards are for ${header.language}, not ${lang.id}" }
+        schema = header.schema
+        args["test-shards"]?.let { val (th, _) = ExampleShards.readAll(File(it), testEx) { m -> log("test $m") }; require(th.schema.hash == schema.hash) { "test shards have another schema" } }
+        source = "shards=${args["shards"]}"
+        log("${lang.id}: ${schema.size} features, language block ${schema.languageFeatures}")
+    } else {
+        val corpus = corpus(args, lang)
+        val lm = NgramModel.read(File(args.getValue("lm")))
+        val loaded = load(corpus, args, args["max-files"]?.toInt())
+        val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0,
+                                        baseCount = args["features"]?.toInt() ?: FeatureSchema.BASE.size)
+        schema = gen.schema()
+        log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
+        for ((_, t) in loaded.train) gen.generate(t) { trainEx.add(it) }
+        for ((_, t) in loaded.test) gen.generate(t) { testEx.add(it) }
+        source = "proxy examples; lm=${args.getValue("lm")}"
+        args["dump-shards"]?.let { dir ->
+            File(dir).mkdirs()
+            ExampleShards.Writer(File(dir, "train.cmlx"), lang.id, source, schema).use { w -> trainEx.forEach(w::add) }
+            ExampleShards.Writer(File(dir, "test.cmlx"), lang.id, source, schema, withNames = true).use { w -> testEx.forEach(w::add) }
+            log("shards written to $dir")
+        }
+    }
     log("examples: train ${trainEx.size}, test ${testEx.size}, avg candidates %.1f".format(trainEx.sumOf { it.size }.toDouble() / trainEx.size.coerceAtLeast(1)))
 
     val trainer = LinearRankerTrainer(schema, l2 = args["l2"]?.toDouble() ?: 1e-4, learningRate = args["lr"]?.toDouble() ?: 0.1, epochs = args["epochs"]?.toInt() ?: 10)
     val (ranker, _) = trainer.train(trainEx) { log(it) }
     val out = File(args.getValue("out"))
-    ranker.write(out, lang.id, "proxy examples; lm=${args.getValue("lm")}")
+    ranker.write(out, lang.id, source)
     log("written $out")
 
     // baselines on the same test lists: single features
-    fun single(name: String) = FeatureSchema.BASE.indexOf(name)
+    fun single(name: String) = schema.baseIndex(name)
     val baselines = linkedMapOf(
         "ranker" to { ex: TrainingExample -> ranker.scores(ex) },
         "baseline: alphabetical (ties -> last)" to { ex: TrainingExample -> FloatArray(ex.size) { 0f } },
@@ -229,6 +250,7 @@ private fun trainRanker(args: Map<String, String>) {
         "baseline: most recent in file" to { ex: TrainingExample -> FloatArray(ex.size) { -ex.baseFeature(it, single("recency_log")) } },
     )
     for ((title, scorer) in baselines) {
+        if (testEx.isEmpty()) break
         val m = RankMetrics()
         for (ex in testEx) m.add(ex, scorer(ex))
         System.err.print(m.report(title))
@@ -243,21 +265,30 @@ private fun trainRanker(args: Map<String, String>) {
 
 private fun evalRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = corpus(args, lang)
-    val lm = NgramModel.read(File(args.getValue("lm")))
     val ranker = LinearRanker.read(File(args.getValue("rank")))
-    val test = load(corpus, args, args["max-files"]?.toInt()).test
-    val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0, baseCount = ranker.schema.size / (1 + io.github.completionml.core.spi.ContextKind.values().size))
-    require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
     val m = RankMetrics(); val base = RankMetrics()
-    val lmIdx = FeatureSchema.BASE.indexOf("lm_logprob")
+    val lmIdx = ranker.schema.baseIndex("lm_logprob")
     var n = 0
-    for ((_, t) in test) gen.generate(t) { ex ->
-        n++
-        m.add(ex, ranker.scores(ex))
-        base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) })
+    val add = { ex: TrainingExample -> n++; m.add(ex, ranker.scores(ex)); base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) }) }
+    if (args["shards"] != null) {
+        val (header, _) = ExampleShards.readAll(File(args.getValue("shards")), object : AbstractMutableList<TrainingExample>() {
+            override val size get() = 0
+            override fun get(index: Int) = throw IndexOutOfBoundsException()
+            override fun add(index: Int, element: TrainingExample) { add(element) }
+            override fun removeAt(index: Int) = throw UnsupportedOperationException()
+            override fun set(index: Int, element: TrainingExample) = throw UnsupportedOperationException()
+        })
+        require(header.schema.hash == ranker.schema.hash) { "ranker schema differs from the shards'" }
+        log("${lang.id}: $n lists from ${args.getValue("shards")}; ranker ${args.getValue("rank")}")
+    } else {
+        val corpus = corpus(args, lang)
+        val lm = NgramModel.read(File(args.getValue("lm")))
+        val test = load(corpus, args, args["max-files"]?.toInt()).test
+        val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0, baseCount = ranker.schema.baseSize)
+        require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
+        for ((_, t) in test) gen.generate(t, add)
+        log("${lang.id}: ${test.size} test files, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
     }
-    log("${lang.id}: ${test.size} test files, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
     System.err.print(m.report("ranker"))
     System.err.print(base.report("baseline: n-gram log-prob only"))
 }

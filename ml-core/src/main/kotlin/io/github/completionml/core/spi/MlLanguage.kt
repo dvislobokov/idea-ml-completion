@@ -23,4 +23,13 @@ interface MlLanguage {
     val keywords: Set<String>
     /** File extensions (with dot) that belong to this language. */
     val extensions: Set<String>
+
+    /**
+     * Names of the PSI-derived per-candidate features this adapter supplies, in the order their values are passed to
+     * `FeatureExtractor.features(...)`. They form the language block of the ranker schema
+     * (`FeatureSchema.common(languageFeatures = rankFeatures)`); the adapter's offline generator and its IDE weigher must
+     * compute them with the same code. Empty for the lexer-only proxy. Convention: lower_snake_case, values in [0, ~10]
+     * (binary flags, small counts, `ln(1+x)` for unbounded quantities).
+     */
+    val rankFeatures: List<String> get() = emptyList()
 }

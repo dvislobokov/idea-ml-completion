@@ -171,3 +171,18 @@ on the full corpus.
 `tools/server/` — runbook for a 24-core / 64 GB Linux box: `setup.sh` (JDK 21, build, environment report), `fetch.sh`
 (both corpora, resumable), `stats.sh`, `sets.sh` (deterministic test / lm / rank repository folds), `train.sh <lang> <tag>
 [l2 args]` (standard measurement, logs and `summary.txt` per experiment), `report.sh`. See `tools/server/README.md`.
+
+## e09 — adapter contract: language feature block, shared feature extractor, example shards
+
+Preparation for the PSI-based generators in the plugins (docs/ADAPTER.md):
+
+- `MlLanguage.rankFeatures` — names of the PSI-derived per-candidate features an adapter supplies; they form the language
+  block of the schema (`FeatureSchema.common(languageFeatures = ...)`), conjoined with the context kind like the common block.
+- `FeatureExtractor` + `FileState` — the common features (LM with cache, frequency, recency, prefix, list-relative) now live in
+  one class used by `ProxyExampleGenerator` and, later, by the IDE weigher — the training/serving parity point.
+- `ExampleShards` (`*.cmlx`, gzip, self-describing with schema and source) — exchange format between the plugin generators
+  and `ml-train`. `l1 --shards <dir> [--test-shards <dir>]` trains on shards, `l1 ... --dump-shards <dir>` writes proxy
+  examples as shards, `eval-rank --shards <dir>` evaluates a ranker on shards.
+
+Regression: proxy ranker on the C# standard folds reproduces e07 exactly (MRR 0.723, top-1 0.606); training from the dumped
+shards gives the same numbers. 17 unit tests green.

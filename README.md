@@ -13,6 +13,12 @@ ml-train/     CLI for offline training/evaluation (`l2`, `l1`, `eval-lm`, `token
 tools/corpus/ repository selection (GitHub API) and sparse cloning; reviewed lists in data/<lang>-repos.{csv,md}
 ```
 
+## Embedding into the plugins
+
+The plugins take this repository as a `git subtree` under `ml/` and include `ml/ml-core` in their Gradle build; the
+adapter contract (language feature block, offline generator, weigher, parity test) is in `docs/ADAPTER.md`. `ml-core`
+stays stdlib-only so it can be embedded without class-loader conflicts.
+
 ## Build and test
 
 JDK 21, Gradle wrapper 9.7.1, Kotlin 2.3.21 (`apiVersion` 2.3: stdlib comes from the IDE platform when embedded).
