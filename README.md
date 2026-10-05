@@ -61,6 +61,25 @@ Ranker examples are held in RAM compactly (8 base floats per candidate): ~32 byt
 
 `--min-count a,b,c,d` is per order (1-gram..4-gram). `--vocab` keeps the top-N identifiers by document frequency; the rest map to `<ID>`.
 
+## Experiment log
+
+`CHANGELOG.md` records one experiment per commit with measurements. Current standard measurement: all cloned repositories
+(33 Go / 15 C#), **held-out repositories** for testing, MinHash deduplication, per-file cache LM (λ=0.3), LM and ranker
+trained on disjoint repository folds (`../ml-data/<lang>/sets/{lm,rank,test}.txt`). `tools/bench/std.sh <lang> <tag>` runs it.
+
+| what changed | effect (Go / C#) |
+|---|---|
+| e01 fixed-context scorer | LM scoring 2–3× faster, identical output |
+| e02 24-bit fingerprints + 8-bit quantised values | model 45 → 19 MB, no measurable loss |
+| e03 SRILM-style pruning (`--min-count 1,1,2,2`) | 19 → 8 MB for +0.5–0.9 perplexity, −1 p.p. top-1; `--min-repos` added |
+| e04 per-file cache LM | perplexity 8.3 → 5.0 / 9.9 → 5.8; identifier top-1 +14 p.p.; ranker MRR +0.04–0.06 |
+| e05 dedup + repo split | honest numbers: OOV 9 → 29 % / 17 → 27 %, ranker MRR ≈ 0.71–0.72 (file split was optimistic) |
+| e06 JM vs MKN, order 5 | MKN stays; order 5 = −0.4 perplexity for 2× size |
+| e07 list features + cross-fitting | leakage found and fixed; 13 features: MRR 0.718 / 0.723 |
+
+**Server recipe update:** train the LM on `sets/lm.txt` repositories and the ranker on `sets/rank.txt` (disjoint), hold out
+`sets/test.txt`; pass `--dedup 0.8 --cache 0.3`; prune with `--min-count 1,1,2,2` (re-measure `--min-repos 1,1,1,3` on the full corpus).
+
 ## Scaling check: 3 → 13 repos per language (split by file 90/10, same test files for both model versions)
 
 Added C#: PowerShell, calculator, semantic-kernel, Bulk-Crap-Uninstaller, MaterialDesignInXaml, Flow.Launcher, Playnite,

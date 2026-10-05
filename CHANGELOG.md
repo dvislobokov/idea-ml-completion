@@ -134,3 +134,27 @@ Conclusion: with a properly estimated MKN the literature result does not transfe
 JM at equal order; JM wins only on identifier top-1 (+1–3 p.p., it spreads less mass to unseen words), which the ranker does
 not convert into MRR. Order 5 buys ~0.4 perplexity for 2× size; worth it only after pruning on the full corpus. Keep MKN-4
 as default; JM stays available (`--smoothing jm`) for the project-level model where counts are small.
+
+## e07 — list-relative ranker features and cross-fitted training (LM and ranker on disjoint repositories)
+
+New base features: `lm_rank_log`, `lm_delta_best` (rank/gap by LM score within the list), `lm_global_logprob` (global LM
+without cache, so the model can weigh cache vs global), `freq_rank_log`, `is_most_recent`; `--features N` keeps the first N
+base features for ablations. 8 → 13 base features, 56 → 91 weights.
+
+First attempt (LM trained on the same repositories the ranker trains on) made things **worse**: Go MRR 0.712 → 0.683,
+C# 0.720 → 0.680, while the training loss converged normally. Cause: the LM has memorised the ranker's training files, so
+`lm_global_logprob` is inflated there, the ranker over-trusts it and fails on unseen repositories — a leakage that the
+single mixed LM feature had been masking partially. Fix: **cross-fitting** — LM trained on `sets/lm.txt` (2/3 of the
+training repos), ranker on `sets/rank.txt` (the other 1/3), both evaluated on the held-out repos (`sets/test.txt`).
+
+| ranker (standard split, cache λ=0.3) | Go MRR / top-1 / top-5 | C# MRR / top-1 / top-5 |
+|---|---|---|
+| 8 features, LM on all train repos (e05, leaky) | 0.712 / 0.601 / 0.848 | 0.720 / 0.608 / 0.858 |
+| 13 features, LM on all train repos (leaky) | 0.683 / 0.567 / 0.824 | 0.680 / 0.558 / 0.830 |
+| 8 features, cross-fitted | 0.715 / 0.601 / 0.857 | 0.716 / 0.598 / 0.864 |
+| **13 features, cross-fitted** | **0.718 / 0.604 / 0.861** | **0.723 / 0.606 / 0.871** |
+| LM-only baseline | 0.551 | 0.530 |
+
+The ranker trained on 1/3 of the repositories with a smaller LM matches or beats the leaky full-data one — data volume is
+not the bottleneck for L1 (as docs/RESEARCH.md says: features are). Cross-fitting is now mandatory for the server recipe;
+the real PSI features (expected type, kind, scope) are the next lever, and they need the plugin adapters.

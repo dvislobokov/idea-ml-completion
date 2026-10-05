@@ -21,6 +21,7 @@ class LinearRankerTest {
         val size = 2 + rnd.nextInt(8)
         val chosen = rnd.nextInt(size)
         val f = Array(size) { c -> FloatArray(FeatureSchema.BASE.size).also { b -> b[sig] = rnd.nextFloat() + (if (c == chosen) 0.6f else 0f); b[noise] = rnd.nextFloat(); b[anti] = rnd.nextFloat() - (if (c == chosen) 0.4f else 0f) } }
+        FeatureSchema.fillListFeatures(f)
         TrainingExample(ContextKind.values()[it % ContextKind.values().size], f, chosen)
     }
 

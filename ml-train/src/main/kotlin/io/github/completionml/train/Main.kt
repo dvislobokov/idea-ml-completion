@@ -23,7 +23,9 @@ private const val USAGE = """
 usage:
   l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2] [--cache 0.3] [--smoothing mkn|jm] [--lambda 0.5]
       count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
-  l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60] [--cache 0.3]
+  l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60] [--cache 0.3] [--features 8]
+      NOTE: train the LM on repositories disjoint from the ranker's training repositories (--repos lists), otherwise the
+      LM feature is inflated on the ranker's training data and the ranker over-trusts it on unseen projects.
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
   eval-lm --lang .. --data <dir> --lm <lm.cml>      re-evaluate an n-gram model on the test split
   common: --repos <file>   restrict the corpus to the repo directory names listed in the file (one per line)
@@ -117,7 +119,7 @@ private fun trainLm(args: Map<String, String>) {
 
     val cacheLambda = args["cache"]?.toDouble() ?: 0.0
     if (args["eval-exact"] == "true") { log("eval of the exact (unquantised) model:"); evaluateLm(exact, corpus, test, cacheLambda) }
-    evaluateLm(NgramModel.read(out), corpus, test, cacheLambda)
+    if (args["no-eval"] != "true") evaluateLm(NgramModel.read(out), corpus, test, cacheLambda)
 }
 
 private fun evalLm(args: Map<String, String>) {
@@ -185,7 +187,8 @@ private fun trainRanker(args: Map<String, String>) {
     val corpus = corpus(args, lang)
     val lm = NgramModel.read(File(args.getValue("lm")))
     val loaded = load(corpus, args, args["max-files"]?.toInt())
-    val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0)
+    val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0,
+                                    baseCount = args["features"]?.toInt() ?: FeatureSchema.BASE.size)
     val schema = gen.schema()
     log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
     val trainEx = ArrayList<TrainingExample>(); val testEx = ArrayList<TrainingExample>()
@@ -227,7 +230,7 @@ private fun evalRanker(args: Map<String, String>) {
     val lm = NgramModel.read(File(args.getValue("lm")))
     val ranker = LinearRanker.read(File(args.getValue("rank")))
     val test = load(corpus, args, args["max-files"]?.toInt()).test
-    val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0)
+    val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0, baseCount = ranker.schema.size / (1 + io.github.completionml.core.spi.ContextKind.values().size))
     require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
     val m = RankMetrics(); val base = RankMetrics()
     val lmIdx = FeatureSchema.BASE.indexOf("lm_logprob")

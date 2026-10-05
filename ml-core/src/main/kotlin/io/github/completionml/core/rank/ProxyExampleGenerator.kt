@@ -29,8 +29,10 @@ class ProxyExampleGenerator(
     /** > 0: mix a per-file cache LM into the LM feature with this weight (what the IDE will do). */
     private val cacheLambda: Double = 0.0,
     private val cacheOrder: Int = 3,
+    /** number of base features to emit (ablations; default all) */
+    private val baseCount: Int = FeatureSchema.BASE.size,
 ) {
-    private val schema = FeatureSchema.common()
+    private val schema = FeatureSchema.common(baseCount)
 
     fun schema() = schema
 
@@ -73,8 +75,10 @@ class ProxyExampleGenerator(
                         base[5] = if (name[0].isUpperCase()) 1f else 0f
                         base[6] = if (id != Vocabulary.UNK_ID) 1f else 0f
                         base[7] = listSizeLog
+                        base[10] = lm?.logProb(ids, i, id) ?: 0f
                         base
                     }
+                    FeatureSchema.fillListFeatures(features)
                     sink(TrainingExample(kind, features, chosen, names))
                 }
             }
