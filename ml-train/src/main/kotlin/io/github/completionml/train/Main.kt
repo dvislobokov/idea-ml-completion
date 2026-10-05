@@ -18,7 +18,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE = """
 usage:
-  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true]
+  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2]
       count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
   l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60]
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
@@ -67,7 +67,8 @@ private fun trainLm(args: Map<String, String>) {
     val corpus = corpus(args, lang)
     val order = args["order"]?.toInt() ?: 4
     val maxVocab = args["vocab"]?.toInt() ?: 50_000
-    val minCounts = (args["min-count"] ?: "1").split(",").map { it.trim().toInt() }.let { l -> IntArray(order) { l.getOrElse(it) { l.last() } } }
+    fun perOrder(key: String) = (args[key] ?: "1").split(",").map { it.trim().toInt() }.let { l -> IntArray(order) { l.getOrElse(it) { l.last() } } }
+    val minCounts = perOrder("min-count"); val minRepos = perOrder("min-repos")
     val files = corpus.files()
     val (test, train) = files.partition { corpus.isTest(it) }
     log("${lang.id}: ${corpus.repos.size} repos, ${files.size} files (train ${train.size}, test ${test.size}), order $order")
@@ -80,10 +81,11 @@ private fun trainLm(args: Map<String, String>) {
     log("vocabulary: ${vocab.size} entries from ${vb.tokens} tokens in ${vb.files} files")
 
     // pass 2: counts
-    val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.toInt().coerceAtLeast(1 shl 16))
-    for (t in tokenised) trainer.addFile(vocab.encode(t))
+    val trainer = NgramTrainer(order, vocab, expectedTokens = vb.tokens.toInt().coerceAtLeast(1 shl 16), trackRepos = minRepos.any { it > 1 })
+    val repoIndex = corpus.repos.withIndex().associate { it.value.name to it.index }
+    for ((i, t) in tokenised.withIndex()) trainer.addFile(vocab.encode(t), repoIndex.getValue(train[i].repo))
     tokenised.clear()
-    val exact = trainer.estimate(minCounts) { log(it) }
+    val exact = trainer.estimate(minCounts, minRepos) { log(it) }
     val bits = args["fp-bits"]?.toInt() ?: 24
     val out = File(args.getValue("out"))
     exact.write(out, lang.id, "repos=${corpus.repos.joinToString(",") { it.name }}", bits)

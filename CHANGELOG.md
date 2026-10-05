@@ -55,3 +55,26 @@ entry. The exact `LongFloatMap` stays for training; `NgramModel.write` converts.
 
 Quantisation to 256 bins is lossless for ranking purposes. Combined with `--min-count 1,1,2,2` the model would be ~7–8 MB.
 (Eval time in this run is not comparable: both languages ran concurrently.)
+
+## e03 — correct pruning (SRILM-style) and per-repository thresholds
+
+Bug found while adding `--min-repos`: pruning was applied to the count tables *before* estimation, so (a) continuation counts
+of lower orders were computed from already-pruned higher orders and (b) kept probabilities were re-estimated from the
+reduced totals. Now the model is estimated from full counts; pruned n-grams are then removed and the backoff weight of their
+context is recomputed as γ = (1 − Σ kept p) / (1 − Σ kept p_lower), so kept probabilities stay exactly as estimated and the
+distribution still sums to one (test `prunedModelStillSumsToOneAndKeepsProbabilities`). `NgramTable` can track the number of
+distinct repositories per n-gram (`--min-repos a,b,c,d`, plan §5.5 memorisation guard).
+
+| variant | Go size | Go ppl | Go top-1/top-5 | Go ranker MRR | C# size | C# ppl | C# top-1/top-5 | C# ranker MRR |
+|---|---|---|---|---|---|---|---|---|
+| no pruning | 18.6 MB | 8.3 | 0.333 / 0.522 | 0.715 | 19.1 MB | 9.9 | 0.303 / 0.487 | 0.741 |
+| `--min-count 1,1,2,2` (old, wrong pruning) | 18 MB* | 9.5 | 0.320 / 0.497 | — | 20 MB* | 11.9 | 0.284 / 0.456 | — |
+| `--min-count 1,1,2,2` (fixed) | **7.7 MB** | **8.8** | **0.327 / 0.506** | **0.706** | **8.1 MB** | **10.8** | **0.292 / 0.466** | **0.731** |
+| `--min-repos 1,1,1,2` (4-grams in ≥ 2 repos) | 8.7 MB | 10.7 | 0.262 / 0.438 | 0.687 | 8.9 MB | 13.3 | 0.222 / 0.404 | 0.712 |
+| `--min-repos 1,1,2,2` | 3.7 MB | 15.3 | 0.222 / 0.349 | 0.630 | 3.8 MB | 21.0 | 0.167 / 0.276 | 0.652 |
+
+\* old numbers were measured with format v1 (12 bytes/entry); the fixed pruning yields the same entry count at v2 size.
+
+Singleton pruning of orders 3–4 is now nearly free: −59 % size for +0.5–0.9 perplexity and −0.6/−1.1 p.p. top-1.
+The repository threshold is too aggressive on 13 repositories (most 4-grams live in one repo); it is meant for the full corpus
+(≥ 3 of 300 repos) and must be re-measured there — keep it off until then.

@@ -19,14 +19,32 @@ class NgramModelTest {
         "x := f(1) ; y := g(x) ; z := h(y)",
     )
 
-    private fun train(order: Int): NgramModel {
+    private fun train(order: Int, minCounts: IntArray = IntArray(order) { 1 }, minRepos: IntArray = IntArray(order) { 1 }): NgramModel {
         val vb = Vocabulary.Builder()
         val toks = files.map { GoLanguage.tokenizer.tokens(it) }
         toks.forEach { vb.addFile(it) }
         val vocab = vb.build(1000, minDocFreq = 1)
-        val tr = NgramTrainer(order, vocab)
-        toks.forEach { tr.addFile(vocab.encode(it)) }
-        return tr.estimate()
+        val tr = NgramTrainer(order, vocab, trackRepos = true)
+        toks.forEachIndexed { i, t -> tr.addFile(vocab.encode(t), repo = i / 2) }   // two "repositories"
+        return tr.estimate(minCounts, minRepos)
+    }
+
+    @Test fun prunedModelStillSumsToOneAndKeepsProbabilities() {
+        val full = train(3)
+        val pruned = train(3, minCounts = intArrayOf(1, 1, 2))
+        val byRepo = train(3, minRepos = intArrayOf(1, 1, 2))
+        val v = full.vocab
+        val ctx = intArrayOf(v.id("{"), v.id("return"))
+        for (m in listOf(pruned, byRepo)) {
+            var sum = 0.0
+            for (w in 0 until v.size) sum += exp(m.logProb(ctx, w).toDouble())
+            assertTrue(abs(sum - 1.0) < 1e-3, "pruned model sum = $sum")
+        }
+        // "return a" (count 1 in {return) was pruned by count; "return 0"/"return 1" are kept with unchanged probability? No —
+        // kept entries keep their full-count estimate exactly:
+        val ctx2 = intArrayOf(v.id(";"), v.id("return"))   // "; return <NUM>" occurs 3 times -> kept; "{ return a/b" once each -> pruned
+        assertEquals(full.logProb(ctx2, v.id("<NUM>")), pruned.logProb(ctx2, v.id("<NUM>")), 1e-5f)
+        assertTrue(pruned.entryCount < full.entryCount)
     }
 
     @Test fun distributionsSumToOne() {
