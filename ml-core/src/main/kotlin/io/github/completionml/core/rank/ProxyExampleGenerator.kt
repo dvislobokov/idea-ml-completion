@@ -1,6 +1,9 @@
 package io.github.completionml.core.rank
 
+import io.github.completionml.core.ngram.CacheLm
+import io.github.completionml.core.ngram.MixedLm
 import io.github.completionml.core.ngram.NgramModel
+import io.github.completionml.core.ngram.TokenLm
 import io.github.completionml.core.spi.ContextKind
 import io.github.completionml.core.spi.MlToken
 import io.github.completionml.core.spi.TokenKind
@@ -23,6 +26,9 @@ class ProxyExampleGenerator(
     private val maxCandidates: Int = 100,
     private val maxExamplesPerFile: Int = 60,
     private val seed: Long = 7,
+    /** > 0: mix a per-file cache LM into the LM feature with this weight (what the IDE will do). */
+    private val cacheLambda: Double = 0.0,
+    private val cacheOrder: Int = 3,
 ) {
     private val schema = FeatureSchema.common()
 
@@ -31,6 +37,8 @@ class ProxyExampleGenerator(
     fun generate(tokens: List<MlToken>, sink: (TrainingExample) -> Unit) {
         val rnd = java.util.Random(seed xor tokens.size.toLong())
         val ids = vocab.encode(tokens)
+        val cache = if (lm != null && cacheLambda > 0) CacheLm(cacheOrder, vocab.size) else null
+        val scorer: TokenLm? = if (cache != null) MixedLm(lm!!, cache, cacheLambda) else lm
         val lastSeen = HashMap<String, Int>()      // identifier -> last token index
         val freq = HashMap<String, Int>()
         val positions = ArrayList<Int>()
@@ -57,7 +65,7 @@ class ProxyExampleGenerator(
                         val name = names[c]
                         val id = vocab.id(name)
                         val base = FloatArray(FeatureSchema.BASE.size)
-                        base[0] = lm?.logProb(ids, i, id) ?: 0f
+                        base[0] = scorer?.logProb(ids, i, id) ?: 0f
                         base[1] = ln(1.0 + (freq[name] ?: 0)).toFloat()
                         base[2] = lastSeen[name]?.let { ln(1.0 + (i - it)).toFloat() } ?: 0f
                         base[3] = name.length / 10f
@@ -71,6 +79,7 @@ class ProxyExampleGenerator(
                 }
             }
             if (t.kind == TokenKind.IDENT) { lastSeen[t.text] = i; freq.merge(t.text, 1, Int::plus) }
+            cache?.add(ids[i])
         }
     }
 

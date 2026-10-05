@@ -78,3 +78,20 @@ distinct repositories per n-gram (`--min-repos a,b,c,d`, plan §5.5 memorisation
 Singleton pruning of orders 3–4 is now nearly free: −59 % size for +0.5–0.9 perplexity and −0.6/−1.1 p.p. top-1.
 The repository threshold is too aggressive on 13 repositories (most 4-grams live in one repo); it is meant for the full corpus
 (≥ 3 of 300 repos) and must be re-measured there — keep it off until then.
+
+## e04 — per-file cache LM mixed into the global model
+
+`CacheLm` (order 3, interpolated absolute discounting over the tokens seen so far in the file) and `MixedLm`
+(P = λ·P_cache + (1−λ)·P_global). Used both for LM evaluation and as the `lm_logprob` ranker feature (`--cache λ`).
+This is the "localness of software" component (Tu, Su & Devanbu 2014); the IDE will feed the cache from the editor buffer.
+
+| metric | Go, no cache | Go, λ=0.3 | Go, λ=0.5 | C#, no cache | C#, λ=0.3 |
+|---|---|---|---|---|---|
+| perplexity | 8.3 | **5.0** | 4.9 | 9.9 | **5.8** |
+| next identifier top-1 / top-5 | 0.333 / 0.522 | **0.471 / 0.707** | 0.490 / 0.717 | 0.303 / 0.487 | **0.443 / 0.670** |
+| ranker MRR / top-1 | 0.715 / 0.606 | **0.773 / 0.673** | 0.768 / 0.667 | 0.741 / 0.641 | **0.779 / 0.687** |
+| LM-only baseline MRR | 0.631 | 0.719 | 0.714 | 0.585 | 0.677 |
+
+Largest gain of all experiments so far, at zero model size and ~1 µs per token of bookkeeping. λ=0.5 is better for the raw LM,
+λ=0.3 for the ranker; keep 0.3 as default and tune λ per project later (plan §6, EM on held-out files). Decay of old cache
+entries and a project-level cache (Hellendoorn's nested cache) are the obvious next steps (see docs/RESEARCH.md §1, §7).

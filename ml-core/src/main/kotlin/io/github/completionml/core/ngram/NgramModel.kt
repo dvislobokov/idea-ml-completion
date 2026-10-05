@@ -21,9 +21,9 @@ class NgramModel(
     val vocab: Vocabulary,
     private val probs: FloatLookup,
     private val backoffs: FloatLookup,
-) {
+) : TokenLm {
     /** log P(word | context), where [context] holds the preceding ids and the last `order-1` of them are used. */
-    fun logProb(context: IntArray, contextEnd: Int, word: Int): Float {
+    override fun logProb(context: IntArray, contextEnd: Int, word: Int): Float {
         val maxCtx = minOf(order - 1, contextEnd)
         var backoff = 0f
         for (k in maxCtx downTo 0) {

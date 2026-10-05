@@ -2,7 +2,10 @@ package io.github.completionml.train
 
 import io.github.completionml.core.eval.RankMetrics
 import io.github.completionml.core.lex.Languages
+import io.github.completionml.core.ngram.CacheLm
+import io.github.completionml.core.ngram.MixedLm
 import io.github.completionml.core.ngram.NgramModel
+import io.github.completionml.core.ngram.TokenLm
 import io.github.completionml.core.ngram.NgramTrainer
 import io.github.completionml.core.ngram.PerplexityAccumulator
 import io.github.completionml.core.rank.FeatureSchema
@@ -18,9 +21,9 @@ import kotlin.system.exitProcess
 
 private const val USAGE = """
 usage:
-  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2]
+  l2  --lang csharp|go --data <dir> --out <lm.cml> [--order 4] [--vocab 50000] [--min-count 1,1,2,2] [--split auto|repo|file] [--fp-bits 24] [--eval-exact true] [--min-repos 1,1,1,2] [--cache 0.3]
       count n-grams on the train split, estimate modified Kneser-Ney, evaluate on the test split, write the model
-  l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60]
+  l1  --lang csharp|go --data <dir> --lm <lm.cml> --out <rank.cml> [--epochs 10] [--l2 1e-4] [--lr 0.1] [--max-files N] [--per-file 60] [--cache 0.3]
       generate proxy ranking examples, train the listwise logistic regression, report metrics vs. baselines
   eval-lm --lang .. --data <dir> --lm <lm.cml>      re-evaluate an n-gram model on the test split
   common: --repos <file>   restrict the corpus to the repo directory names listed in the file (one per line)
@@ -91,8 +94,9 @@ private fun trainLm(args: Map<String, String>) {
     exact.write(out, lang.id, "repos=${corpus.repos.joinToString(",") { it.name }}", bits)
     log("written $out (${out.length() / 1024} KB, $bits-bit fingerprints, 8-bit values)")
 
-    if (args["eval-exact"] == "true") { log("eval of the exact (unquantised) model:"); evaluateLm(exact, corpus, test) }
-    evaluateLm(NgramModel.read(out), corpus, test)
+    val cacheLambda = args["cache"]?.toDouble() ?: 0.0
+    if (args["eval-exact"] == "true") { log("eval of the exact (unquantised) model:"); evaluateLm(exact, corpus, test, cacheLambda) }
+    evaluateLm(NgramModel.read(out), corpus, test, cacheLambda)
 }
 
 private fun evalLm(args: Map<String, String>) {
@@ -100,39 +104,61 @@ private fun evalLm(args: Map<String, String>) {
     val corpus = corpus(args, lang)
     val model = NgramModel.read(File(args.getValue("lm")))
     val test = corpus.files().filter { corpus.isTest(it) }
-    evaluateLm(model, corpus, test)
+    evaluateLm(model, corpus, test, args["cache"]?.toDouble() ?: 0.0)
 }
 
 /** Perplexity over all tokens; next-token top-1/top-5 over identifiers that are in the vocabulary (what gray text could predict). */
-private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Source>) {
+private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Source>, cacheLambda: Double = 0.0) {
     val ppAll = PerplexityAccumulator(); val ppIdent = PerplexityAccumulator()
     var identPositions = 0L; var top1 = 0L; var top5 = 0L; var oov = 0L; var scored = 0L
     val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
     val t0 = System.currentTimeMillis()
+    val vocab = model.vocab
     for (s in test) {
         val tokens = readTokens(corpus, s)
-        val ids = model.vocab.encode(tokens)
+        val ids = vocab.encode(tokens)
         val padded = IntArray(ids.size + model.order - 1) { if (it < model.order - 1) Vocabulary.BOS_ID else ids[it - model.order + 1] }
+        val cache = if (cacheLambda > 0) CacheLm(3, vocab.size) else null
+        val lm: TokenLm = if (cache != null) MixedLm(model, cache, cacheLambda) else model
         for (i in ids.indices) {
             val pos = i + model.order - 1
-            val lp = model.logProb(padded, pos, ids[i])
+            val lp = lm.logProb(padded, pos, ids[i])
             ppAll.add(lp)
             if (tokens[i].kind == TokenKind.IDENT) {
                 identPositions++
-                if (ids[i] == Vocabulary.UNK_ID) { oov++; continue }
+                if (ids[i] == Vocabulary.UNK_ID) { oov++; cache?.add(ids[i]); continue }
                 ppIdent.add(lp)
                 if (identPositions % sampleEvery == 0L) {
                     scored++
-                    val top = model.topK(padded, pos, 5) { model.vocab.isIdentifier(it) && it != Vocabulary.UNK_ID }
+                    val top = if (cache == null) model.topK(padded, pos, 5) { vocab.isIdentifier(it) && it != Vocabulary.UNK_ID }
+                              else topKMixed(model, cache, cacheLambda, padded, pos, 5) { vocab.isIdentifier(it) && it != Vocabulary.UNK_ID }
                     if (top.isNotEmpty() && top[0].first == ids[i]) top1++
                     if (top.any { it.first == ids[i] }) top5++
                 }
             }
+            cache?.add(ids[i])
         }
     }
-    log("LM eval on ${test.size} files: perplexity all=%.1f (%.2f bits), identifiers in vocab=%.1f; identifier OOV rate=%.1f%%".format(
-        ppAll.perplexity, ppAll.entropyBits, ppIdent.perplexity, 100.0 * oov / identPositions.coerceAtLeast(1)))
+    log("LM eval on ${test.size} files%s: perplexity all=%.1f (%.2f bits), identifiers in vocab=%.1f; identifier OOV rate=%.1f%%".format(
+        if (cacheLambda > 0) " (cache λ=$cacheLambda)" else "", ppAll.perplexity, ppAll.entropyBits, ppIdent.perplexity, 100.0 * oov / identPositions.coerceAtLeast(1)))
     log("next identifier (sampled %d positions, in-vocab): top1=%.3f top5=%.3f; %.1f s".format(scored, top1.toDouble() / scored.coerceAtLeast(1), top5.toDouble() / scored.coerceAtLeast(1), (System.currentTimeMillis() - t0) / 1000.0))
+}
+
+/** Top-k over the vocabulary for the cache mixture: global scores via the fixed-context Scorer, cache probabilities on top. */
+private fun topKMixed(model: NgramModel, cache: CacheLm, lambda: Double, ctx: IntArray, pos: Int, k: Int, filter: (Int) -> Boolean): List<Pair<Int, Float>> {
+    val scorer = model.scorer(ctx, pos)
+    val best = ArrayList<Pair<Int, Float>>()
+    for (w in 0 until model.vocab.size) {
+        if (!filter(w)) continue
+        val p = (kotlin.math.ln(lambda * cache.prob(ctx, pos, w) + (1 - lambda) * kotlin.math.exp(scorer.logProb(w).toDouble()))).toFloat()
+        if (best.size < k) { best.add(w to p); if (best.size == k) best.sortByDescending { it.second } }
+        else if (p > best.last().second) {
+            best[best.size - 1] = w to p
+            var i = best.size - 1
+            while (i > 0 && best[i].second > best[i - 1].second) { val t = best[i]; best[i] = best[i - 1]; best[i - 1] = t; i-- }
+        }
+    }
+    return best
 }
 
 private fun trainRanker(args: Map<String, String>) {
@@ -141,7 +167,7 @@ private fun trainRanker(args: Map<String, String>) {
     val lm = NgramModel.read(File(args.getValue("lm")))
     val files = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }
     val (test, train) = files.partition { corpus.isTest(it) }
-    val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60)
+    val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0)
     val schema = gen.schema()
     log("${lang.id}: generating examples from ${train.size} train / ${test.size} test files, ${schema.size} features")
     val trainEx = ArrayList<TrainingExample>(); val testEx = ArrayList<TrainingExample>()
@@ -183,7 +209,7 @@ private fun evalRanker(args: Map<String, String>) {
     val lm = NgramModel.read(File(args.getValue("lm")))
     val ranker = LinearRanker.read(File(args.getValue("rank")))
     val test = corpus.files().let { f -> args["max-files"]?.toInt()?.let { f.take(it) } ?: f }.filter { corpus.isTest(it) }
-    val gen = ProxyExampleGenerator(lm.vocab, lm)
+    val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0)
     require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
     val m = RankMetrics(); val base = RankMetrics()
     val lmIdx = FeatureSchema.BASE.indexOf("lm_logprob")
