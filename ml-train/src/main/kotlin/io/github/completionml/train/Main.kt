@@ -38,6 +38,8 @@ usage:
           --test-repos a__b,c__d   hold out exactly these repositories (directory names)
   eval-rank --lang .. --rank <rank.cml> (--data <dir> --lm <lm.cml> [--max-files N] | --shards <dir>)
       re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
+  eval-inline --lang .. --data <dir> --lm <lm.cml> [--cache 0.3] [--max-tokens 8] [--stride 50] [--max-test-files N]
+      greedy multi-token continuation (inline "grey text") on the test split: how many of the next tokens the LM gets right
   tokens  --lang .. --file <path>                   dump tokens (lexer debugging)
 """
 
@@ -50,6 +52,7 @@ fun main(argv: Array<String>) {
         "l1" -> trainRanker(args)
         "eval-lm" -> evalLm(args)
         "eval-rank" -> evalRanker(args)
+        "eval-inline" -> evalInline(args)
         "tokens" -> dumpTokens(args)
         else -> { System.err.println(USAGE); exitProcess(2) }
     }
@@ -67,13 +70,13 @@ private fun parse(a: List<String>): Map<String, String> {
     return m
 }
 
-private fun log(s: String) = System.err.println("[%tT] %s".format(System.currentTimeMillis(), s))
+internal fun log(s: String) = System.err.println("[%tT] %s".format(System.currentTimeMillis(), s))
 
-private fun corpus(args: Map<String, String>, lang: io.github.completionml.core.spi.MlLanguage) =
+internal fun corpus(args: Map<String, String>, lang: io.github.completionml.core.spi.MlLanguage) =
     Corpus(File(args.getValue("data")), lang, args["split"] ?: "auto", includeList = args["repos"]?.let { File(it) },
            testRepos = args["test-repos"]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: emptySet())
 
-private fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.tokenizer.tokens(s.file.readText())
+internal fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.tokenizer.tokens(s.file.readText())
 
 /**
  * Train/test files after the split and `--dedup`; tokens are not kept — every pass re-tokenises the files in parallel batches
@@ -82,7 +85,7 @@ private fun readTokens(c: Corpus, s: Corpus.Source): List<MlToken> = c.language.
 class Loaded(val train: List<Corpus.Source>, val test: List<Corpus.Source>)
 
 /** Tokenises [sources] in parallel batches and hands the files to [consumer] one by one, in order, on the calling thread. */
-private fun forEachTokenised(corpus: Corpus, sources: List<Corpus.Source>, batch: Int = 256, consumer: (Corpus.Source, List<MlToken>) -> Unit) {
+internal fun forEachTokenised(corpus: Corpus, sources: List<Corpus.Source>, batch: Int = 256, consumer: (Corpus.Source, List<MlToken>) -> Unit) {
     for (from in sources.indices step batch) {
         val chunk = sources.subList(from, minOf(from + batch, sources.size))
         val tokens = chunk.parallelStream().map { readTokens(corpus, it) }.toList()
@@ -90,7 +93,7 @@ private fun forEachTokenised(corpus: Corpus, sources: List<Corpus.Source>, batch
     }
 }
 
-private fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = null): Loaded {
+internal fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = null): Loaded {
     val files = corpus.files().let { f -> maxFiles?.let { f.take(it) } ?: f }
     val (testAll, trainSrc) = files.partition { corpus.isTest(it) }
     val maxTest = args["max-test-files"]?.toInt()
@@ -204,7 +207,7 @@ private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Sour
 }
 
 /** Top-k over the vocabulary for the cache mixture: global scores via the fixed-context Scorer, cache probabilities on top. */
-private fun topKMixed(model: NgramModel, cache: CacheLm, lambda: Double, ctx: IntArray, pos: Int, k: Int, filter: (Int) -> Boolean): List<Pair<Int, Float>> {
+internal fun topKMixed(model: NgramModel, cache: CacheLm, lambda: Double, ctx: IntArray, pos: Int, k: Int, filter: (Int) -> Boolean): List<Pair<Int, Float>> {
     val scorer = model.scorer(ctx, pos)
     val best = ArrayList<Pair<Int, Float>>()
     for (w in 0 until model.vocab.size) {
