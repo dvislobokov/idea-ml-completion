@@ -19,7 +19,7 @@ done
 here="$(cd "$(dirname "$0")" && pwd)"
 log="$here/../../../ml-data/fetch-$lang.log"
 selected=$(jq -r --argjson s "$minstars" 'select(.archived==false and .stars>=$s) | "\(.stars) \(.full_name)"' "$catalog" | sort -rn | awk '{print $2}')
-[ "$limit" -gt 0 ] && selected=$(echo "$selected" | head -n "$limit")
+[ "$limit" -gt 0 ] && selected=$(echo "$selected" | awk -v n="$limit" 'NR<=n')
 echo "$(echo "$selected" | grep -c .) repositories selected" >&2
 [ "$dry" = 1 ] && { echo "$selected" | head -20; exit 0; }
 echo "$selected" | FETCH_MODE=tar xargs -P "$jobs" -n 1 "$here/fetch.sh" "$lang" 2>> "$log"
