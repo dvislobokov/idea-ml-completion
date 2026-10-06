@@ -1,77 +1,110 @@
 # idea-ml-completion
 
-Shared ML engine for smart code completion in the `idea-dotnet-support` (C#) and `idea-golang-support` (Go) IntelliJ plugins.
-Plan and design decisions: `../idea-dotnet-support/ML_COMPLETION_PLAN.md`. Pure JVM, no Python or network at runtime.
+Local ML engine for code completion in the `idea-golang-support` (Go) and `idea-dotnet-support` (C#) IntelliJ plugins:
+an n-gram language model with a listwise ranker for the completion list, and our own small transformer for whole-line
+("ghost text") suggestions. Everything that runs on the user's machine is Kotlin/JVM inside the plugin — no Python,
+no third-party model runtimes, no network. Optional native SIMD kernels (our own C, ~100 KB per platform) speed the
+transformer up 3–4× and fall back to Kotlin when absent.
 
-Status (2026-10-05): **prototype**. L2 (n-gram LM) and L1 (listwise logistic-regression ranker) train end to end on a
-small local corpus; features for L1 come from a language-agnostic proxy generator until the plugin adapters exist.
+Design notes and all measurements: [`docs/NEURAL-RU.md`](docs/NEURAL-RU.md) (Russian). Experiment history: `CHANGELOG.md`.
+
+## Results (2026-10-06)
+
+Whole-line suggestions, Go, 300 held-out repositories, 3 000 positions, same protocol for both models:
+
+| | n-gram LM (e14) | neural go31m (31 M params) |
+|---|---|---|
+| positions where a suggestion is shown, at ≈95 % whole-line precision | 10 % | **32 %** |
+| rest of the line completed exactly (≤ 8 tokens left) | 35 % | **66 %** |
+| first token right | 0.65 | **0.80** |
+| inside string literals (log messages, format strings) | ≈ 0 | shown 36 %, 75 % right |
+| model file | 32 MB | 31 MB (int8) |
+| 20-token line, 8 threads, this server — Kotlin / native kernels | — | 530 ms / **167 ms** (while typing, KV cache reused: 47 / 24 ms) |
+
+Completion-list ranking (Go, real plugin lists, held-out repos): MRR 0.783 / top-1 0.675 vs plugin rules 0.534 / 0.394 (e10).
+C#: n-gram LM 32 MB, proxy-list ranker MRR 0.756 (e15). C# transformer cs31m (same size, secret-scrubbed corpus): whole-line suggestions shown in 18 % of positions at 92 % precision (n-gram: 3 % at 88 %), rest of line exact 49 % vs 32 %, first token 0.72 vs 0.57 — C# is harder for both models, and the transformer fixes the n-gram's arity failures (`)` after the last argument: 65 % vs the n-gram's literal continuation).
+
+## Layout
 
 ```
-ml-core/      pure Kotlin, embedded into plugins: lexers (C#, Go), vocabulary, modified Kneser–Ney n-gram LM,
-              linear ranker + trainer, feature schema, .cml model format, metrics
-ml-train/     CLI for offline training/evaluation (`l2`, `l1`, `eval-lm`, `tokens`)
-tools/corpus/ repository selection (GitHub API) and sparse cloning; reviewed lists in data/<lang>-repos.{csv,md}
+ml-core/        pure Kotlin, embedded into the plugins (stdlib only, JDK 21, no preview APIs):
+                lex/        C# and Go lexers (tokens for the n-gram model and ranker features)
+                ngram/      modified Kneser–Ney n-gram LM, per-file cache LM, partitioned trainer
+                rank/       listwise linear ranker, feature schema, example shards
+                bpe/        byte-level BPE tokenizer (parity-tested against the Python trainer)
+                nn/         transformer inference: CMLN model format (int8, mmap), KV cache, scalar kernels,
+                            nn/native: JNI loader for the SIMD kernels with scalar fallback
+                format/     .cml container
+ml-core/src/vector/   Vector API kernels — benchmark reference only (JBR does not ship jdk.incubator.vector)
+native/         C11 SIMD kernels (AVX2 / AVX-512 (VNNI) / NEON), self-test, benchmark, cross-compiled with zig
+ml-train/       Kotlin CLI: prepare, shard, l2 (LM), l1 (ranker), eval-lm, eval-rank, eval-inline, tokens, bench-nn
+tools/nn/       Python (PyTorch) — training side only: tokenizer/ (BPE trainer, corpus encoder), train/ (model, data,
+                FIM, training loop, .cml export), eval/ (inline-completion harness, parity fixtures), clean/ (secret scrubbing)
+tools/corpus/   GitHub catalogue (enumerate.py) and parallel source-only download (fetch-catalog.sh)
+tools/server/   server setup, disk preparation, training recipes
+docs/           NEURAL-RU.md (design + results), NN-FORMAT.md, NATIVE-KERNELS.md, NN-PARITY.md, ADAPTER.md (plugin
+                contract), RESEARCH.md (literature), REPORT-*-RU.md, SERVER-RU.md, EARLY-RESULTS.md
 ```
-
-## Embedding into the plugins
-
-The plugins take this repository as a `git subtree` under `ml/` and include `ml/ml-core` in their Gradle build; the
-adapter contract (language feature block, offline generator, weigher, parity test) is in `docs/ADAPTER.md`. `ml-core`
-stays stdlib-only so it can be embedded without class-loader conflicts.
 
 ## Build and test
 
-JDK 21, Gradle wrapper 9.7.1, Kotlin 2.3.21 (`apiVersion` 2.3: stdlib comes from the IDE platform when embedded).
+JDK 21, Gradle wrapper, Kotlin 2.3.
 
 ```sh
-./gradlew.bat :ml-core:test :ml-train:installDist -q     # tests + CLI at ml-train/build/install/ml-train/bin/ml-train(.bat)
+./gradlew :ml-core:test :ml-train:test :ml-train:installDist -q   # CLI at ml-train/build/install/ml-train/bin/ml-train
+./gradlew :ml-core:vectorTest                                      # same nn tests with --add-modules jdk.incubator.vector
+make -C native test                                                # C self-test + benchmark; `make cross` builds all 4 platforms (zig)
 ```
 
-## Data layout
+`ml-core` tests include the BPE parity fixture (small, committed) and the neural inference tests (scalar, native, incremental
+decode vs. naive reference). The large parity fixtures (`CML_BPE_FIXTURE`, `~/work/ml-data/.../parity`) are optional and skipped
+when absent.
 
-`../ml-data/<lang>/repos/<owner>__<repo>/` — sparse clones (only `*.cs` / `*.go`, LICENSE, README; no history).
-Generated files (`*.g.cs`, `*.Designer.cs`, `*.pb.go`, `<auto-generated`, `Code generated … DO NOT EDIT`), `bin/ obj/ vendor/
-testdata/ …` and files > 1 MB are skipped by `ml-train`. Train/test split: by repository when there are ≥ 20 repos, else by file hash
-(`--split repo|file` overrides).
+## Embedding into the plugins
 
-## Full training run (server)
+The plugins take this repository as a `git subtree` under `ml/` and include `ml/ml-core` in their Gradle build; the adapter
+contract (language feature block, offline generator, weigher, parity test) is in `docs/ADAPTER.md`. Models are plain files in
+the plugin resources: `<lang>-lm.cml` (n-gram), `<lang>-rank.cml` (ranker), `<lang>-nn.cml` (transformer + BPE vocabulary).
+The native kernels are loaded from `ml-core` resources (`native/libcmlkernels-<os>-<arch>.*`) through `NativeLib`; any load or
+self-test failure selects the Kotlin kernels (`-Dcompletionml.nn.native=false` forces it; `.native.mode=q8|f32` picks the
+activation mode, q8 by default).
 
-Reviewed lists: `tools/corpus/data/csharp-repos.csv` (737 repos, stars ≥ 300, ~6.4 GB of `.cs`) and `go-repos.csv`
-(900 repos, stars ≥ 1487, ~3.4 GB of `.go`). Lists are sorted by stars, so `--limit` takes the most popular ones.
+## Data pipeline
 
 ```sh
-# 1. clone (sparse, no history; resumable). Limit by count or by git-packed size from the list:
-tools/corpus/fetch-all.sh csharp --jobs 8                     # everything
-tools/corpus/fetch-all.sh go --limit 300 --jobs 8             # first 300 by stars
-tools/corpus/fetch-all.sh go --max-gb 20 --dry-run            # show what fits into ~20 GB packed, clone nothing
+# 0. corpus: all non-fork GitHub repositories with ≥ 20 stars (catalogue), source-only snapshots (*.go / *.cs + LICENSE/README)
+python3 tools/corpus/enumerate.py go  > ../ml-data/catalog/go-20.jsonl
+tools/corpus/fetch-catalog.sh go ../ml-data/catalog/go-20.jsonl --jobs 32          # resumable; ~25 min for 34 k Go repos
 
-# 2. n-gram LM per language (CPU; memory grows with distinct n-grams — see below)
-ML=ml-train/build/install/ml-train/bin/ml-train
-JAVA_OPTS="-Xmx48g" $ML l2 --lang csharp --data ../ml-data/csharp --out ../ml-data/csharp/lm.cml --order 4 --vocab 50000 --min-count 1,1,2,2
-JAVA_OPTS="-Xmx48g" $ML l2 --lang go     --data ../ml-data/go     --out ../ml-data/go/lm.cml     --order 4 --vocab 50000 --min-count 1,1,2,2
+# 1. manifest: filters (generated/vendored code, size, encoding), near-dedup 0.8, deterministic folds lm / rank / test
+ML=ml-train/build/install/ml-train/bin/ml-train      # copy the install dir before long runs: rebuilding replaces jars under a running JVM
+JAVA_OPTS=-Xmx64g $ML prepare --lang go --data ../ml-data/go --catalog ../ml-data/catalog/go-20.jsonl --test 300
+#    -> go/prepared/manifest.jsonl (one line per file: repo, path, bytes, lines, tokens, fold, status) + stats.json
 
-# 3. ranker per language (uses the LM as a feature)
-JAVA_OPTS="-Xmx16g" $ML l1 --lang csharp --data ../ml-data/csharp --lm ../ml-data/csharp/lm.cml --out ../ml-data/csharp/rank.cml --epochs 10
-JAVA_OPTS="-Xmx16g" $ML l1 --lang go     --data ../ml-data/go     --lm ../ml-data/go/lm.cml     --out ../ml-data/go/rank.cml     --epochs 10
+# 2a. n-gram path: lexer token shards, LM, ranker, evaluation
+$ML shard --lang go --data ../ml-data/go                                              # ~15 min, 23 GB for 5.8 G tokens
+JAVA_OPTS=-Xmx110g $ML l2 --lang go --token-shards ../ml-data/go/shards --out ../ml-data/go/models/lm.cml --order 5 \
+    --min-count 1,2,5,8,8 --min-repos 1,1,10,40,60 --partitions 64 --threads 24 --cache 0.3 --max-test-files 3000
+$ML eval-inline --lang go --token-shards ../ml-data/go/shards --lm ../ml-data/go/models/lm.cml --max-test-files 2000
+$ML l1 --lang go --token-shards ../ml-data/go/shards --lm ../ml-data/go/models/lm.cml --out ../ml-data/go/models/rank.cml
+
+# 2b. neural path (server with a GPU; venv with torch): BPE vocabulary, secret-scrubbed uint16 shards, training, export, eval
+cd tools/nn/tokenizer && python -I train_bpe.py --lang go --vocab 16384                 # ~5 min on a 1.6 GB stratified sample
+cd ../clean      && python -I encode_corpus_clean.py --vocab ../../../../ml-data/tokenizer/go-16384.bpe --lang go --fold lm --workers 24
+cd ../train      && python -I train.py --preset go31m --run go31m-e1 --max-tokens 6.8e9 --compile ...   # see train/README.md
+                    python -I export.py --ckpt .../ckpt-latest.pt --out ../../../../ml-data/go/models/go-nn-31m.cml --check 128
+cd ../eval       && python -I eval_inline.py --ckpt .../ckpt-latest.pt --positions 3000 --modes plain,fim,spm --dump 60
 ```
 
-Memory: counting keeps all orders in RAM (8 + 4 + 4·order bytes per distinct n-gram, ×1.4 for the hash table). On the
-prototype corpus 1.6 M tokens produced 0.5 M distinct n-grams; distinct n-grams grow roughly linearly with tokens for code,
-so ~1 G tokens → ~300 M n-grams → ~15–20 GB heap for order 4. If that is too much, train on a subset of repos first or
-raise `--min-count` (it is applied after counting, so it reduces the model, not the peak). Sharded counting is the next step
-if the server has less memory.
-
-Ranker examples are held in RAM compactly (8 base floats per candidate): ~32 bytes × candidates. With the default
-`--per-file 60` lists per file, 13 repos (6 k files) needed ~0.5 GB; 300 repos → ~10 GB at 6 GB default heap, so either
-`--per-file 20`, `--max-files N`, or `JAVA_OPTS=-Xmx24g`. Streaming examples from disk shards is the next step.
-
-`--min-count a,b,c,d` is per order (1-gram..4-gram). `--vocab` keeps the top-N identifiers by document frequency; the rest map to `<ID>`.
+Folds are assigned by the md5 of the repository name (first `--test` repositories → test, every third of the rest → rank,
+others → lm), so LM, ranker and evaluation never share a repository and every run is reproducible from the manifest.
+`--token-shards` replaces `--data` for `l2`, `eval-lm`, `eval-inline`, `l1`, `eval-rank`; the old tree-walking path still works
+for small corpora. Long jobs on the server run under `systemd-run` (see `tools/server/` and `CLAUDE.md`).
 
 ## Experiment log
 
-`CHANGELOG.md` records one experiment per commit with measurements. Current standard measurement: all cloned repositories
-(33 Go / 15 C#), **held-out repositories** for testing, MinHash deduplication, per-file cache LM (λ=0.3), LM and ranker
-trained on disjoint repository folds (`../ml-data/<lang>/sets/{lm,rank,test}.txt`). `tools/bench/std.sh <lang> <tag>` runs it.
+`CHANGELOG.md` records one experiment per commit with measurements. Standard measurement: repository split, near-dedup 0.8,
+per-file cache LM (λ=0.3), LM / ranker / test on disjoint repository folds, 300 held-out repositories for the full corpora.
 
 | what changed | effect (Go / C#) |
 |---|---|
@@ -84,70 +117,20 @@ trained on disjoint repository folds (`../ml-data/<lang>/sets/{lm,rank,test}.txt
 | e07 list features + cross-fitting | leakage found and fixed; 13 features: MRR 0.718 / 0.723 |
 | e10 ranker on real Go completion lists (PSI) | held-out repos: MRR 0.783 vs plugin rules 0.534 (top-1 0.675 vs 0.394) |
 | e11 full corpus on the server (580 Go repos) | LM ppl 5.5 → 5.0, OOV 29 → 21.5 %; proxy ranker MRR 0.739; repo pruning: 163 → 20 MB at −0.002 MRR |
-| e12 full C# corpus (472 repos), Go order 5 | C#: ppl 5.9, proxy ranker MRR 0.718, 20 MB at −0.006; Go order 5 + repo pruning: ppl 4.7, MRR 0.742, 27 MB (best) |
+| e12 full C# corpus (472 repos), Go order 5 | C#: ppl 5.9, proxy ranker MRR 0.718, 20 MB at −0.006; Go order 5 + repo pruning: ppl 4.7, MRR 0.742, 27 MB |
 | e13 inline continuation with the n-gram LM | Go: 30 % of lines finished exactly; gated at confidence 0.8: shown 9 % of positions, 90 % right |
+| e14 full Go corpus (22 610 repos, 3.9 G tokens): token shards, partitioned counting | order 5, 32 MB: ppl 4.1, top-1 0.521 (207 MB unpruned-ish: 3.8 / 0.525); inline at 0.8: 10 % shown, 93 % right; proxy ranker MRR 0.759 |
+| e15 full C# corpus (24 945 repos, 2.95 G tokens), stricter generated-code filters | order 5, 32 MB: ppl 5.9, top-1 0.484 (52 MB: 5.6 / 0.490; 24 MB: 6.1 / 0.483); inline at 0.8: 3 % shown, 88 % right; proxy ranker MRR 0.756 (e12: 0.712) |
+| **e16 own transformer go31m** (d512 × 8, 31 M, BPE 16k, FIM, 6.8 G tokens, 2.5 h on one GPU) | Go: ppl 2.13 (BPE); whole-line suggestions at 95 % precision shown in 32 % of positions (n-gram: 10 %), rest of line exact 66 % vs 35 %; int8 export lossless; Kotlin inference reproduces PyTorch 1000/1000 lines; native kernels ×3.2. **cs31m** (C#, 5.65 G tokens, secret-scrubbed): ppl 3.97; shown 18 % at 92 % (n-gram 3 % at 88 %), rest of line exact 49 % vs 32 % |
 
-**Server recipe update:** train the LM on `sets/lm.txt` repositories and the ranker on `sets/rank.txt` (disjoint), hold out
-`sets/test.txt`; pass `--dedup 0.8 --cache 0.3`; prune with `--min-count 1,1,2,2` (re-measure `--min-repos 1,1,1,3` on the full corpus).
+Earlier prototype and scaling tables: `docs/EARLY-RESULTS.md`.
 
-## Scaling check: 3 → 13 repos per language (split by file 90/10, same test files for both model versions)
+## Constraints
 
-Added C#: PowerShell, calculator, semantic-kernel, Bulk-Crap-Uninstaller, MaterialDesignInXaml, Flow.Launcher, Playnite,
-BenchmarkDotNet, Newtonsoft.Json, eShop. Added Go: ollama, frp, fzf, dive, lazydocker, etcd, LocalAI, v2ray-core, cli, bubbletea.
-
-| metric (on the 13-repo test split) | Go, 3-repo model | Go, 13-repo model | C#, 3-repo model | C#, 13-repo model |
-|---|---|---|---|---|
-| train tokens / vocabulary | 0.66 M / 10.7 k | 8.0 M / 50 k | 1.6 M / 18 k | 7.9 M / 50 k |
-| perplexity per token | 38.6 | **8.3** | 92.3 | **9.9** |
-| identifier OOV rate | 38 % | 8.8 % | 50 % | 17.5 % |
-| next identifier, LM alone, top-1 / top-5 | 0.27 / 0.42 | 0.33 / 0.52 | 0.22 / 0.38 | 0.30 / 0.49 |
-| ranker MRR / top-1 (proxy lists) | 0.55 / 0.43 | **0.72 / 0.61** | 0.56 / 0.44 | **0.74 / 0.64** |
-| LM-only baseline MRR | 0.47 | 0.63 | 0.44 | 0.59 |
-| ranker gain over LM-only, MRR | +0.08 | +0.08 | +0.12 | +0.15 |
-| lists / avg candidates | 22.8 k / 32 | 22.8 k / 32 | 23.7 k / 29 | 23.7 k / 29 |
-| LM size, gzip, no pruning | 5.9 MB | 45 MB | 8.7 MB | 46 MB |
-
-The 3-repo models look fine on their own test split (see below) but collapse on unseen repositories: half of the C#
-identifiers are out of vocabulary. More repositories fix generalisation first of all; the ranker's gain over the LM-only
-baseline also grows with data (C#: +0.12 → +0.15 MRR).
-
-### Model size: what pruning buys (13-repo models)
-
-| `--min-count` (1-gram..4-gram) | Go size | Go perplexity | Go top-1/top-5 | C# size | C# perplexity | C# top-1/top-5 |
-|---|---|---|---|---|---|---|
-| 1,1,1,1 (none) | 45 MB | 8.3 | 0.33 / 0.52 | 46 MB | 9.9 | 0.30 / 0.49 |
-| 1,1,2,2 | 18 MB | 9.5 | 0.32 / 0.50 | 20 MB | 11.9 | 0.28 / 0.46 |
-| 1,2,2,3 | 12 MB | 10.0 | 0.32 / 0.49 | | | |
-| 1,2,3,3 | 11 MB | 10.3 | 0.32 / 0.49 | 12 MB | 13.1 | 0.28 / 0.45 |
-| order 3, no pruning | | | | 20 MB | 13.0 | 0.24 / 0.42 |
-
-Dropping singletons of orders 3–4 cuts the size 2.5× for ~1 point of perplexity and ~1 p.p. of top-1; pruning beats
-lowering the order at equal size. Further reductions not yet implemented, in order of payoff:
-
-1. **Quantise values**: today each entry is an 8-byte hash + 4-byte float, and gzip cannot compress hashes. KenLM-style
-   8-bit quantisation of log-probs and backoffs (bins fitted per order) → 9 bytes/entry, −25 %.
-2. **Shorter fingerprints**: a 32-bit fingerprint in a sorted array per order (binary search / interpolation search) instead
-   of a 64-bit open-addressing key → 5 bytes/entry with quantised values, −55 % on top of pruning; collision rate ~1e-9 per
-   lookup at 10 M entries. Both changes are a `ModelFormat.VERSION` bump.
-3. **Repo-count threshold** (plan §5.5): keep 4-grams seen in ≥ 3 repositories — also the memorisation guard; needs
-   per-repo counting (cheap: count distinct repo ids per 4-gram during the counting pass).
-4. **Smaller vocabulary**: fewer identifier types → fewer distinct n-grams; costs OOV (17 % for C# at 50 k already).
-5. **Entropy pruning** (Stolcke 1998): drop n-grams whose removal changes the model's distribution least; better
-   quality per byte than count thresholds but needs a second pass over the model.
-
-## Prototype results (3 repos per language, split by file 90/10)
-
-| | Go (cobra, gin, caddy) | C# (spectre.console, Polly, Humanizer) |
-|---|---|---|
-| tokens / vocabulary | 0.66 M / 10.7 k | 1.6 M / 18.3 k |
-| LM size (`lm.cml`, gzip) | 5.9 MB | 8.7 MB |
-| perplexity per token | 11.5 | 9.6 |
-| next identifier top-1 / top-5 (LM alone, in-vocab) | 0.31 / 0.52 | 0.42 / 0.61 |
-| ranker top-1 / top-5 / MRR (proxy lists, avg 38 and 27 candidates) | 0.59 / 0.83 / 0.70 | 0.68 / 0.88 / 0.77 |
-| best single-feature baseline (LM log-prob) MRR | 0.64 | 0.73 |
-| frequency / recency baselines MRR | 0.42 / 0.43 | 0.41 / 0.41 |
-| inference per candidate | 0.03 µs | 0.05 µs |
-
-Caveats: the ranker is trained on *proxy* lists (candidates = identifiers seen earlier in the same file), not on real
-completion lists from PSI/Roslyn; the gain over the LM-only baseline (+0.04..0.06 MRR) is what the extra features add on top
-of the LM. Real adapters will add expected-type, scope and kind features, which the plan expects to matter most.
+- No third-party pretrained models and no third-party inference runtimes in the plugins; the transformer is trained from
+  scratch on our corpus and run by our Kotlin (and optionally our C) code.
+- Nothing is required from the user: no `vmoptions` edits (JetBrains Runtime has no `jdk.incubator.vector`; the scalar Kotlin
+  path is the production path), no downloads at runtime.
+- Training data: public GitHub repositories (≥ 20 stars, no forks), generated and vendored code removed, near-duplicates
+  removed, secrets and personal data scrubbed before encoding (`tools/nn/clean`). Corpora and models are not part of this
+  repository.

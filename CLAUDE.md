@@ -16,17 +16,26 @@ tooling is `ml-train` (Kotlin CLI) plus, for the neural model, PyTorch under `~/
 ## Hard constraints from the user
 - No third-party pretrained models (Qwen, llama-family, …) and no native runtimes (llama.cpp, ONNX) in the plugins.
   A neural model must be our own, trained offline, exported to our `.cml` format and run by Kotlin code in `ml-core`.
+- Nothing may be required from the user (no vmoptions edits). JBR ships NO `jdk.incubator.vector` (verified on JBR 25.0.3; the flag
+  breaks IDE startup), so the scalar Kotlin path is the production path; no preview APIs in `ml-core`. Design doc: `docs/NEURAL-RU.md`.
 - Nothing leaves the machine except GitHub (this repo is public) — no corpus or model uploads elsewhere.
 
 ## This server (161.104.59.19)
 - 32× EPYC 9554, 176 GB RAM, RTX PRO 6000 Blackwell 96 GB (CUDA 13.4), Ubuntu 26.04, JDK 21, Node 22, uv.
-  `/dev/sda1` 400 GB system (corpus lives here now); `/dev/sdb` 2 TB unformatted, reserved for the rest of the corpus — ask before touching.
+  `/dev/sda1` 400 GB system (Go corpus lives here); `/dev/sdb` 2 TB ext4 at `/mnt/corpus` (C# corpus; fstab by UUID, `noatime`).
+  Both disks are mounted `noatime` — cold reads used to collapse to ~1 MB/s from an atime writeback storm (`tools/server/prepare-disk.sh`).
+- Run Claude Code inside `tmux` (`tmux new -s ml`, `claude --resume`): without it an SSH drop kills the session and its subagents.
+  Subagents: `fable` by default in this project (its quota is separate from sonnet/opus, which hit the weekly limit on 2026-10-06);
+  parallel agents in git worktrees. Rebuilding `ml-train` while a run is in flight crashes it (`NoClassDefFoundError`) — copy
+  `ml-train/build/install/ml-train` elsewhere for long runs.
 - Repo: `~/work/idea-ml-completion` (git works directly here). CLI: `./gradlew :ml-train:installDist` → `ml-train/build/install/ml-train/bin/ml-train`.
 - Data: `~/work/ml-data/`
   - `catalog/go-20.jsonl`, `catalog/csharp-20.jsonl` — all non-fork GitHub repos ≥20 stars, size>300 KB (34 217 Go / 38 156 C# non-archived)
     with stars, size, licence, pushed_at (`tools/corpus/enumerate.py`).
   - `go/repos/` — ALL 34 215 Go repos downloaded (source-only snapshots `*.go` + LICENSE/README, ~190 GB, 4 fetch errors).
-    `csharp/repos/` — top-10 000 by stars, 9 996 downloaded (~45 GB). Downloads finished 2026-10-06; disk: 264 GB used, 115 GB free.
+    `csharp/repos/` → symlink to `/mnt/corpus/csharp/repos`: all 38 149 non-archived repos (old sda copy in `csharp/repos.sda-old`, delete once verified).
+    `go/prepared/manifest.jsonl` + `stats.json` from `ml-train prepare` (fold lm/rank/test by md5 of repo name, `--test 300`); `go/shards/` lexer
+    token shards; `tokenizer/go-16384.bpe` (+32k) BPE vocabularies and parity fixtures; `go/bpe16k/` BPE-encoded folds for the neural model.
     Download tool: `tools/corpus/fetch-catalog.sh <lang> <catalog> --jobs 32 [--limit N]` (resumable, skips existing);
     GitHub tarballs arrive at ~170 MB/s here, the whole Go catalogue took ~25 min. Logs: `fetch-go.log`, `fetch-csharp.log`.
     A background disk-guard loop (`pgrep -f "df --output"`) kills downloads under 40 GB free — remaining C# repos go to the 2 TB disk.
