@@ -25,19 +25,24 @@ tooling is `ml-train` (Kotlin CLI) plus, for the neural model, PyTorch under `~/
 - Data: `~/work/ml-data/`
   - `catalog/go-20.jsonl`, `catalog/csharp-20.jsonl` — all non-fork GitHub repos ≥20 stars, size>300 KB (34 217 Go / 38 156 C# non-archived)
     with stars, size, licence, pushed_at (`tools/corpus/enumerate.py`).
-  - `go/repos/` — ALL 34 215 Go repos downloaded (source-only snapshots, ~190 GB). `csharp/repos/` — top-10 000 by stars (~45 GB).
-    Download tool: `tools/corpus/fetch-catalog.sh <lang> <catalog> --jobs 32 [--limit N]` (resumable, skips existing).
-    Logs: `fetch-go.log`, `fetch-csharp.log`. A disk guard loop stops downloads under 40 GB free.
+  - `go/repos/` — ALL 34 215 Go repos downloaded (source-only snapshots `*.go` + LICENSE/README, ~190 GB, 4 fetch errors).
+    `csharp/repos/` — top-10 000 by stars, 9 996 downloaded (~45 GB). Downloads finished 2026-10-06; disk: 264 GB used, 115 GB free.
+    Download tool: `tools/corpus/fetch-catalog.sh <lang> <catalog> --jobs 32 [--limit N]` (resumable, skips existing);
+    GitHub tarballs arrive at ~170 MB/s here, the whole Go catalogue took ~25 min. Logs: `fetch-go.log`, `fetch-csharp.log`.
+    A background disk-guard loop (`pgrep -f "df --output"`) kills downloads under 40 GB free — remaining C# repos go to the 2 TB disk.
   - Old server (157.22.134.66, unreachable since 2026-10-06) held the previous 900-Go/737-C# corpus and experiments e11–e13; nothing needed from it.
 - PyTorch: `~/work/nn/.venv` (Python 3.12, torch 2.14 cu130, GPU verified).
-- Claude Code: settings in `~/.claude/settings.json` (OAuth token + proxy in `env`).
+- Claude Code 2.1.291 installed via npm (`claude.ai/install.sh` and `api.anthropic.com` are blocked from RU without proxy);
+  settings in `~/.claude/settings.json` (`env`: OAuth token from `claude setup-token`, HTTP(S)_PROXY, autoupdater off).
 
 ## State of the art (see docs/REPORT-GO-RU.md, docs/REPORT-CSHARP-RU.md, README experiment table)
 - Go LM: order 5 MKN, repo pruning `--min-count 1,1,3,3,3 --min-repos 1,1,2,5,5`: 27 MB, ppl 4.7, OOV 21.5 %, next-identifier top-1 0.497.
 - Go ranker on real plugin completion lists: MRR 0.783 / top-1 0.675 vs plugin rules 0.534 / 0.394. C#: MRR 0.712 (proxy lists), 20 MB LM.
 - e13 inline (n-gram greedy continuation): confidence ≥0.8 shown at 9 % of positions, 90 % right.
 - Go plugin (branch `migration`) already runs the ranker behind `-PmlEnabled=true` (models from `../ml-data/go/models`), ML items marked " ML".
-- GigaCode context providers for both plugins are done on branches `gigacode` (Go 0.2.186, C# 0.1.104), not merged/pushed, not yet verified live.
+- GigaCode context providers for both plugins are done on branches `gigacode` (Go 0.2.186 in worktree `idea-golang-support-gigacode`,
+  C# 0.1.104 in `idea-dotnet-support-gigacode`) on the user's Windows machine only: not merged, not pushed, not verified live with GigaCode.
+  Design: compile-only stub module `gigacode-api` mirroring GigaCode 26.9.3 interfaces, optional `<depends>` + `*-gigacode.xml`.
 
 ## Plan (agreed with the user, in order)
 1. Speed up training: tokenise once into binary shards, parallel n-gram counting and feature extraction across 32 cores,
