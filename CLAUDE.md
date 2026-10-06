@@ -44,23 +44,35 @@ tooling is `ml-train` (Kotlin CLI) plus, for the neural model, PyTorch under `~/
 - Claude Code 2.1.291 installed via npm (`claude.ai/install.sh` and `api.anthropic.com` are blocked from RU without proxy);
   settings in `~/.claude/settings.json` (`env`: OAuth token from `claude setup-token`, HTTP(S)_PROXY, autoupdater off).
 
-## State of the art (see docs/REPORT-GO-RU.md, docs/REPORT-CSHARP-RU.md, README experiment table)
-- Go LM: order 5 MKN, repo pruning `--min-count 1,1,3,3,3 --min-repos 1,1,2,5,5`: 27 MB, ppl 4.7, OOV 21.5 %, next-identifier top-1 0.497.
-- Go ranker on real plugin completion lists: MRR 0.783 / top-1 0.675 vs plugin rules 0.534 / 0.394. C#: MRR 0.712 (proxy lists), 20 MB LM.
-- e13 inline (n-gram greedy continuation): confidence ≥0.8 shown at 9 % of positions, 90 % right.
+## State of the art (2026-10-06; details in docs/NEURAL-RU.md §7a/7b, CHANGELOG e14–e16, README)
+- N-grams on the full corpora: Go e14-b (`go/models/e14-b.cml`, 32 MB, ppl 4.1, inline ≥0.8: 10 % shown / 93 % right),
+  C# e15-a (`csharp/models/e15-a.cml`, 32 MB, ppl 5.9, inline 3 % / 88 %); proxy rankers MRR 0.759 / 0.756.
+  Go ranker on real plugin lists (e10): MRR 0.783 / top-1 0.675 vs plugin rules 0.534 / 0.394 — real C# lists do not exist yet.
+- Own transformers (31 M, d512×8, BPE 16k, FIM, 1 epoch, 2–2.5 h each): `go/models/go-nn-31m-e1.cml` (ppl 2.13; whole line shown
+  in 32 % of positions at 95 % precision vs n-gram 10 %; rest of line exact 66 % vs 35 %; trained BEFORE the secret filter — not for
+  release) and `csharp/models/cs-nn-31m-e1.cml` (ppl 3.97; 18 % at 92 % vs n-gram 3 %; 49 % vs 32 %; secret-scrubbed corpus).
+  Inference layout: SPM (PSM stays weak at 31 M); gate on the product of token probabilities (prod ≥0.8), not on the first-3 mean.
+- Kotlin inference (`ml-core/nn`) reproduces PyTorch (1000/1000 lines); native kernels (`native/`, q8 default) ×3.2: 1 500-token prompt
+  + 20 tokens = 167 ms vs 530 ms scalar, 24 ms vs 47 ms while typing (8 threads, this server). NEON / Windows / macOS loading untested.
+- Eval harness for the neural models: `tools/nn/eval/eval_inline.py --lang go|csharp --ckpt … --positions 3000 --modes plain,fim,spm`
+  (~5 min on the GPU); results in `~/work/ml-data/<lang>/nn/eval-inline-step*.md`; parity fixtures in `go/nn/parity/`.
 - Go plugin (branch `migration`) already runs the ranker behind `-PmlEnabled=true` (models from `../ml-data/go/models`), ML items marked " ML".
 - GigaCode context providers for both plugins are done on branches `gigacode` (Go 0.2.186 in worktree `idea-golang-support-gigacode`,
   C# 0.1.104 in `idea-dotnet-support-gigacode`) on the user's Windows machine only: not merged, not pushed, not verified live with GigaCode.
   Design: compile-only stub module `gigacode-api` mirroring GigaCode 26.9.3 interfaces, optional `<depends>` + `*-gigacode.xml`.
 
-## Plan (agreed with the user, in order)
-1. Speed up training: tokenise once into binary shards, parallel n-gram counting and feature extraction across 32 cores,
-   ranker feature search on a 100k-list subsample. Training must accept a size cap (repos by stars / files per repo / token budget).
-2. Rerun n-gram LM + ranker on the big corpus (Go full, C# 10k) with the standard measurement; experiment rows e14+.
-   Then ranker features (declaration distance, already-used-in-function, expected-type match, project frequency) and a small
-   gradient-boosted ranker with JVM inference.
-3. Own neural model: BPE tokenizer (Kotlin and Python must tokenise identically, parity test), decoder transformer 30→100 M params
-   with fill-in-the-middle, trained on the GPU; export int8 weights to `.cml`; Kotlin inference in `ml-core` (KV cache, multi-thread);
-   compare with n-grams by `ml-train eval-inline` on 30 held-out repos; wire into plugins via `inline.completion.provider`.
-4. "Mapping" suggestions (`member.Name = dto.Name;`) as PSI candidates + ranker; training pairs mined from `a.X = b.Y` in the corpus.
-5. Later: download the remaining C# repos onto the 2 TB disk; retrain; C# plugin ranker adapter.
+## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
+Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
+(b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher
+runs into 2-hour ones; current server is enough until distillation.
+Next steps, in order:
+1. Retrain Go with the secret-scrubbed corpus, clean FIM from step 1, `fim_rate 0.7` (`tools/nn/train/README.md` has the command);
+   consider go50m / 2 epochs; abliations one at a time (FIM share, context, vocab) — ~2.5 h per 31 M run.
+2. Plugin side (repos are NOT on this server): `inline.completion.provider` with incremental KV-cache reuse between keystrokes,
+   background prefill on file open, JIT warm-up, SPM prompt, gate on prod ≥0.8, no one-token closers (`)`, `;`), repetition guard,
+   PSI validation of generated identifiers; C# ranker adapter + collection of real C# completion lists.
+3. Quality levers (see docs/NEURAL-RU.md §7, "what beats FLCC"): PSI context in the prompt (types/signatures from other files),
+   mixture with the project n-gram cache, constrained decoding over PSI candidates, distillation from a 300 M–1 B teacher.
+4. Ranker features + GBDT (plan item 2, second half); "mapping" suggestions (`member.Name = dto.Name;`) as PSI candidates + ranker.
+5. Housekeeping: remove the agent worktrees under `.claude/worktrees/`; old C# manifests `csharp/prepared-v1,-v2` and
+   `go/prepared-prev,-crashed,-300` can be deleted; `go31m-e1/ckpt-before-fimfix.pt` is the pre-fix checkpoint.
