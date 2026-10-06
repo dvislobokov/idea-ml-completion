@@ -7,3 +7,11 @@ tools/corpus/data/*.jsonl
 tools/corpus/data/*.txt
 tools/corpus/data/*.log
 .server-commit
+
+# Claude Code worktrees/settings
+.claude/
+
+# native kernel build outputs (shipping binaries live in ml-core/src/main/resources/native)
+native/build/
+__pycache__/
+*.pyc

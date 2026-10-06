@@ -38,8 +38,17 @@ usage:
           --test-repos a__b,c__d   hold out exactly these repositories (directory names)
   eval-rank --lang .. --rank <rank.cml> (--data <dir> --lm <lm.cml> [--max-files N] | --shards <dir>)
       re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
-  eval-inline --lang .. --data <dir> --lm <lm.cml> [--cache 0.3] [--max-tokens 8] [--stride 50] [--max-test-files N]
+  eval-inline --lang .. --data <dir> --lm <lm.cml> [--cache 0.3] [--max-tokens 8] [--stride 50] [--max-test-files N] [--dump <file> [--dump-conf 0.8] [--dump-n 30]]
       greedy multi-token continuation (inline "grey text") on the test split: how many of the next tokens the LM gets right
+  prepare --lang go --data <dir> [--out <dir>/prepared] [--catalog <jsonl>] [--dedup 0.8 (0 = off)] [--max-file-bytes 1048576] [--test 30]
+          [--max-repos N] [--min-stars N] [--max-files-per-repo N] [--max-bytes N] [--threads N]
+      one-time corpus pass: filters, global dedup, repository folds (lm/rank/test, as tools/server/sets.sh); writes
+      <out>/manifest.jsonl (one line per file read; status ok|dup_exact|dup_near|binary|non_utf8|generated_marker|long_lines|budget) and stats.json
+  shard   --lang go --data <dir> [--manifest <dir>/prepared/manifest.jsonl] [--out <dir>/shards] [--min-count 2] [--threads N]
+      lex every `ok` manifest file once (two passes: token counts, then ids) into fixed-width token shards + shared vocabulary, per fold
+  token shards as input (instead of walking the repo tree; the corpus is already filtered/deduplicated/folded by prepare):
+      l2 / eval-lm / eval-inline / l1 / eval-rank accept  --token-shards <dir> [--train-fold lm|rank (l2: lm, l1: rank)] [--test-fold test]
+      [--max-test-files N] (evenly spaced subsample of the test fold); l2 additionally  [--partitions 64] [--threads 24]  (partitioned counting)
   tokens  --lang .. --file <path>                   dump tokens (lexer debugging)
 """
 
@@ -54,6 +63,8 @@ fun main(argv: Array<String>) {
         "eval-rank" -> evalRanker(args)
         "eval-inline" -> evalInline(args)
         "tokens" -> dumpTokens(args)
+        "prepare" -> prepareCommand(args)
+        "shard" -> shardCommand(args)
         else -> { System.err.println(USAGE); exitProcess(2) }
     }
     log("done in %.1f s".format((System.currentTimeMillis() - t0) / 1000.0))
@@ -115,6 +126,7 @@ internal fun load(corpus: Corpus, args: Map<String, String>, maxFiles: Int? = nu
 
 private fun trainLm(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
+    if (args["token-shards"] != null) { trainLmFromShards(args, lang); return }
     val corpus = corpus(args, lang)
     val order = args["order"]?.toInt() ?: 4
     val maxVocab = args["vocab"]?.toInt() ?: 50_000
@@ -145,15 +157,15 @@ private fun trainLm(args: Map<String, String>) {
     log("written $out (${out.length() / 1024} KB, $bits-bit fingerprints, 8-bit values)")
 
     val cacheLambda = args["cache"]?.toDouble() ?: 0.0
-    if (args["eval-exact"] == "true") { log("eval of the exact (unquantised) model:"); evaluateLm(exact, corpus, test, cacheLambda) }
-    if (args["no-eval"] != "true") evaluateLm(NgramModel.read(out), corpus, test, cacheLambda)
+    val testSet = CorpusTestSet(corpus, test)
+    if (args["eval-exact"] == "true") { log("eval of the exact (unquantised) model:"); evaluateLm(exact, testSet, cacheLambda) }
+    if (args["no-eval"] != "true") evaluateLm(NgramModel.read(out), testSet, cacheLambda)
 }
 
 private fun evalLm(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val corpus = corpus(args, lang)
     val model = NgramModel.read(File(args.getValue("lm")))
-    evaluateLm(model, corpus, load(corpus, args).test, args["cache"]?.toDouble() ?: 0.0)
+    evaluateLm(model, testSet(args, lang), args["cache"]?.toDouble() ?: 0.0)
 }
 
 /** Per-file evaluation result; files are independent (the cache is per file), so they are evaluated in parallel. */
@@ -167,14 +179,14 @@ private class LmFileStats {
 }
 
 /** Perplexity over all tokens; next-token top-1/top-5 over identifiers that are in the vocabulary (what gray text could predict). */
-private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Source>, cacheLambda: Double = 0.0) {
+internal fun evaluateLm(model: NgramModel, test: TestSet, cacheLambda: Double = 0.0) {
     val t0 = System.currentTimeMillis()
     val vocab = model.vocab
     val sampleEvery = 20   // top-k over the whole vocabulary is O(|V|): sample positions
-    val stats = test.parallelStream().map { source ->
-        val tokens = readTokens(corpus, source)
+    val stats = test.indices().parallelStream().map { fileIndex ->
+        val file = test.file(fileIndex, vocab)
         val st = LmFileStats()
-        val ids = vocab.encode(tokens)
+        val ids = file.ids
         val padded = IntArray(ids.size + model.order - 1) { if (it < model.order - 1) Vocabulary.BOS_ID else ids[it - model.order + 1] }
         val cache = if (cacheLambda > 0) CacheLm(3, vocab.size) else null
         val lm: TokenLm = if (cache != null) MixedLm(model, cache, cacheLambda) else model
@@ -182,7 +194,7 @@ private fun evaluateLm(model: NgramModel, corpus: Corpus, test: List<Corpus.Sour
             val pos = i + model.order - 1
             val lp = lm.logProb(padded, pos, ids[i])
             st.tokens++; st.sumAll += lp
-            if (tokens[i].kind == TokenKind.IDENT) {
+            if (file.ident[i]) {
                 st.identPositions++
                 if (ids[i] == Vocabulary.UNK_ID) { st.oov++; cache?.add(ids[i]); continue }
                 st.identTokens++; st.sumIdent += lp
@@ -237,15 +249,28 @@ private fun trainRanker(args: Map<String, String>) {
         source = "shards=${args["shards"]}"
         log("${lang.id}: ${schema.size} features, language block ${schema.languageFeatures}")
     } else {
-        val corpus = corpus(args, lang)
         val lm = NgramModel.read(File(args.getValue("lm")))
-        val loaded = load(corpus, args, args["max-files"]?.toInt())
         val gen = ProxyExampleGenerator(lm.vocab, lm, maxExamplesPerFile = args["per-file"]?.toInt() ?: 60, cacheLambda = args["cache"]?.toDouble() ?: 0.0,
                                         baseCount = args["features"]?.toInt() ?: FeatureSchema.BASE.size)
         schema = gen.schema()
-        log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
-        forEachTokenised(corpus, loaded.train) { _, t -> gen.generate(t) { trainEx.add(it) } }
-        forEachTokenised(corpus, loaded.test) { _, t -> gen.generate(t) { testEx.add(it) } }
+        if (args["token-shards"] != null) {
+            // token shards from `ml-train shard`: ranker fold for training, test fold for evaluation; --max-files / --max-test-files subsample evenly
+            val shards = TokenShards(File(args.getValue("token-shards")))
+            val trainFold = args["train-fold"] ?: "rank"; val testFold = args["test-fold"] ?: "test"
+            fun stride(fold: String, max: Int?) = if (max == null) 1 else ((shards.files(fold) + max - 1) / max).toInt().coerceAtLeast(1)
+            val trainStride = stride(trainFold, args["max-files"]?.toInt()); val testStride = stride(testFold, args["max-test-files"]?.toInt())
+            log("${lang.id}: generating examples from fold $trainFold (every ${trainStride}th of ${shards.files(trainFold)} files) / $testFold (every ${testStride}th of ${shards.files(testFold)}), ${schema.size} features")
+            var k = 0L
+            shards.forEachFile(trainFold) { f -> if (k++ % trainStride == 0L) gen.generate(shards.mlTokens(f)) { trainEx.add(it) } }
+            k = 0
+            shards.forEachFile(testFold) { f -> if (k++ % testStride == 0L) gen.generate(shards.mlTokens(f)) { testEx.add(it) } }
+        } else {
+            val corpus = corpus(args, lang)
+            val loaded = load(corpus, args, args["max-files"]?.toInt())
+            log("${lang.id}: generating examples from ${loaded.train.size} train / ${loaded.test.size} test files, ${schema.size} features")
+            forEachTokenised(corpus, loaded.train) { _, t -> gen.generate(t) { trainEx.add(it) } }
+            forEachTokenised(corpus, loaded.test) { _, t -> gen.generate(t) { testEx.add(it) } }
+        }
         source = "proxy examples; lm=${args.getValue("lm")}"
         args["dump-shards"]?.let { dir ->
             File(dir).mkdirs()
@@ -309,13 +334,21 @@ private fun evalRanker(args: Map<String, String>) {
         require(header.schema.hash == ranker.schema.hash) { "ranker schema differs from the shards'" }
         log("${lang.id}: $n lists from ${args.getValue("shards")}; ranker ${args.getValue("rank")}")
     } else {
-        val corpus = corpus(args, lang)
         val lm = NgramModel.read(File(args.getValue("lm")))
-        val test = load(corpus, args, args["max-files"]?.toInt()).test
         val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0, baseCount = ranker.schema.baseSize)
         require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }
-        forEachTokenised(corpus, test) { _, t -> gen.generate(t, add) }
-        log("${lang.id}: ${test.size} test files, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
+        if (args["token-shards"] != null) {
+            val shards = TokenShards(File(args.getValue("token-shards"))); val fold = args["test-fold"] ?: "test"
+            val stride = args["max-test-files"]?.toInt()?.let { ((shards.files(fold) + it - 1) / it).toInt().coerceAtLeast(1) } ?: 1
+            var k = 0L
+            shards.forEachFile(fold) { f -> if (k++ % stride == 0L) gen.generate(shards.mlTokens(f), add) }
+            log("${lang.id}: fold $fold of ${args.getValue("token-shards")}, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
+        } else {
+            val corpus = corpus(args, lang)
+            val test = load(corpus, args, args["max-files"]?.toInt()).test
+            forEachTokenised(corpus, test) { _, t -> gen.generate(t, add) }
+            log("${lang.id}: ${test.size} test files, $n lists; ranker ${args.getValue("rank")} with LM ${args.getValue("lm")}")
+        }
     }
     System.err.print(m.report("ranker"))
     System.err.print(base.report("baseline: n-gram log-prob only"))

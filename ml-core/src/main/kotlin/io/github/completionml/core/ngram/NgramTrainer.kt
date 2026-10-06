@@ -133,13 +133,20 @@ class NgramTrainer(val order: Int, val vocab: Vocabulary, expectedTokens: Int = 
     private fun discounts(table: NgramTable): DoubleArray {
         val cc = LongArray(5)
         table.forEach { _, c, _, _ -> if (c in 1..4) cc[c]++ }
-        val n1 = cc[1].toDouble().coerceAtLeast(1.0); val n2 = cc[2].toDouble().coerceAtLeast(1.0)
-        val n3 = cc[3].toDouble().coerceAtLeast(1.0); val n4 = cc[4].toDouble().coerceAtLeast(1.0)
-        val y = n1 / (n1 + 2 * n2)
-        return doubleArrayOf(
-            (1 - 2 * y * n2 / n1).coerceIn(0.1, 0.999),
-            (2 - 3 * y * n3 / n2).coerceIn(0.1, 1.999),
-            (3 - 4 * y * n4 / n3).coerceIn(0.1, 2.999),
-        )
+        return discountsFromCounts(cc)
+    }
+
+    companion object {
+        /** [cc] holds the counts of counts n1..n4 at indexes 1..4. */
+        fun discountsFromCounts(cc: LongArray): DoubleArray {
+            val n1 = cc[1].toDouble().coerceAtLeast(1.0); val n2 = cc[2].toDouble().coerceAtLeast(1.0)
+            val n3 = cc[3].toDouble().coerceAtLeast(1.0); val n4 = cc[4].toDouble().coerceAtLeast(1.0)
+            val y = n1 / (n1 + 2 * n2)
+            return doubleArrayOf(
+                (1 - 2 * y * n2 / n1).coerceIn(0.1, 0.999),
+                (2 - 3 * y * n3 / n2).coerceIn(0.1, 1.999),
+                (3 - 4 * y * n4 / n3).coerceIn(0.1, 2.999),
+            )
+        }
     }
 }

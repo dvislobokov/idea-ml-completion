@@ -50,6 +50,14 @@ class Vocabulary private constructor(private val words: Array<String>, private v
             }
         }
 
+        /** Adds pre-aggregated statistics of one token text (document frequency = number of files containing it); see [addTotals]. */
+        fun addCounts(text: String, ident: Boolean, docFreq: Int, termFreq: Long) {
+            this.docFreq.merge(text, docFreq, Int::plus); this.termFreq.merge(text, termFreq, Long::plus)
+            if (ident) identSet.add(text)
+        }
+
+        fun addTotals(files: Int, tokens: Long) { this.files += files; this.tokens += tokens }
+
         /** @param maxIdentifiers how many identifiers to keep (by document frequency, ties by term frequency); others become `<ID>`. */
         fun build(maxIdentifiers: Int, minDocFreq: Int = 2): Vocabulary {
             val fixed = ArrayList<String>()

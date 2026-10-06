@@ -9,5 +9,5 @@ dependencies {
 
 application {
     mainClass.set("io.github.completionml.train.MainKt")
-    applicationDefaultJvmArgs = listOf("-Xmx6g", "-XX:+UseParallelGC")
+    applicationDefaultJvmArgs = listOf("-Xmx6g", "-XX:+UseParallelGC", "--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
