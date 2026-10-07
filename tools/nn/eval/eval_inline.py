@@ -472,6 +472,66 @@ def build_prompt(tok, p, mode, ctx, suffix_tokens, with_path, max_prefix=1450, h
 
 # ----------------------------------------------------------------------------------------------------- inference
 
+class ProjectCache:
+    """Bigram statistics over the BPE tokens of the other files of the same repository ("what this project usually
+    writes"), mixed into the model's next-token distribution at decode time: p = (1-λ)·p_model + λ·p_cache(prev).
+    Built from the encoded test shards (`<lang>/bpe16k/test.*`) per repository; the file being completed is
+    subtracted so that the cache never sees the answer."""
+
+    def __init__(self, shards, V):
+        self.sh, self.V = shards, V
+        self.by_repo = {}
+        self.repo_index = {name: i for i, name in enumerate(shards.repos)}
+        self.path_index = {}
+        for i, (r, path) in enumerate(zip(shards.repo, shards.paths())):
+            self.path_index[(int(r), path)] = i
+
+    def _pairs(self, t):
+        t = t.astype(np.int64)
+        return t[:-1] * self.V + t[1:]
+
+    def repo(self, name):
+        if name not in self.by_repo:
+            ri = self.repo_index.get(name)
+            if ri is None:
+                self.by_repo[name] = None
+            else:
+                files = np.nonzero(self.sh.repo == ri)[0]
+                pairs = np.concatenate([self._pairs(self.sh.file(int(i))) for i in files]) if len(files) else np.zeros(0, np.int64)
+                keys, counts = np.unique(pairs, return_counts=True)
+                self.by_repo[name] = (ri, keys, counts)
+        return self.by_repo[name]
+
+    def for_position(self, repo_name, path):
+        """A function prev_token -> (next ids, probabilities) or (None, None) when the project has no bigram for prev."""
+        r = self.repo(repo_name)
+        if r is None:
+            return None
+        ri, keys, counts = r
+        fi = self.path_index.get((ri, path))
+        if fi is not None:
+            fk, fc = np.unique(self._pairs(self.sh.file(fi)), return_counts=True)
+        else:
+            fk, fc = np.zeros(0, np.int64), np.zeros(0, np.int64)
+        V = self.V
+
+        def dist(prev):
+            lo, hi = np.searchsorted(keys, prev * V), np.searchsorted(keys, (prev + 1) * V)
+            if hi <= lo:
+                return None, None
+            ids, c = keys[lo:hi] % V, counts[lo:hi].astype(np.float64)
+            flo, fhi = np.searchsorted(fk, prev * V), np.searchsorted(fk, (prev + 1) * V)
+            if fhi > flo:   # subtract the completed file's own counts
+                sub = dict(zip((fk[flo:fhi] % V).tolist(), fc[flo:fhi].tolist()))
+                for j, t in enumerate(ids.tolist()):
+                    c[j] -= sub.get(t, 0)
+            tot = c.sum()
+            if tot <= 0:
+                return None, None
+            return ids, c / tot
+        return dist
+
+
 def _rope(x, cos, sin):
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
@@ -517,15 +577,17 @@ class Generator:
             return m.logits(x)[:, -1].float()
 
     @torch.no_grad()
-    def generate(self, prompts, max_new, true_first=None, constraints=None, rep_guard=False):
+    def generate(self, prompts, max_new, true_first=None, constraints=None, rep_guard=False, caches=None, cache_lambda=0.0):
         """prompts: list of id lists. Returns per prompt: (generated ids without the stop token, their probs,
         prob of the stop/last token, stop kind, first-step top-1 id, prob of the true first token).
         `constraints`: per prompt the typed remainder (bytes, may be empty) that the generation must start with — while
-        a remainder is pending, the logits are masked to `Tokenizer.allowed_ids` and the probabilities come from the
-        masked softmax. `rep_guard`: stop (kind "repeat") when `repetition()` fires on the generated ids."""
+        a remainder is pending, the distribution is masked to `Tokenizer.allowed_ids` and renormalised.
+        `rep_guard`: stop (kind "repeat") when `repetition()` fires on the generated ids.
+        `caches`: per prompt a `ProjectCache.for_position` function (or None) mixed in with weight `cache_lambda`."""
         dev = self.dev
         B = len(prompts)
         rem = [b""] * B if constraints is None else [c or b"" for c in constraints]
+        prev = [p[-1] for p in prompts]
         tok_len = self.tok.tok_len
         L = max(len(p) for p in prompts)
         lens = torch.tensor([len(p) for p in prompts], device=dev)
@@ -544,13 +606,23 @@ class Generator:
         done = [False] * B
         top1_first = None; p_true = None
         for step in range(max_new + 1):
+            pr = torch.softmax(logits, dim=-1)
+            if caches is not None and cache_lambda > 0:
+                for b in range(B):
+                    if done[b] or caches[b] is None:
+                        continue
+                    ids, pc = caches[b](prev[b])
+                    if ids is None:
+                        continue
+                    pr[b] *= (1.0 - cache_lambda)
+                    pr[b, torch.as_tensor(ids, device=dev)] += cache_lambda * torch.as_tensor(pc, dtype=pr.dtype, device=dev)
             active = [b for b in range(B) if rem[b] and not done[b]]
             if active:
                 mask = torch.ones(B, self.tok.vocab_size, dtype=torch.bool, device=dev)
                 for b in active:
                     mask[b] = self.tok.allowed_mask(rem[b], dev)
-                logits = logits.masked_fill(~mask, float("-inf"))
-            pr = torch.softmax(logits, dim=-1)
+                pr = pr.masked_fill(~mask, 0.0)
+                pr = pr / pr.sum(dim=-1, keepdim=True).clamp_min(1e-30)
             pmax, nxt = pr.max(dim=-1)
             if step == 0:
                 top1_first = nxt.tolist()
@@ -568,6 +640,7 @@ class Generator:
                     done[b] = True; stop_p[b] = None; stop_kind[b] = "limit"
                 else:
                     gen[b].append(nl[b]); probs[b].append(pl[b])
+                    prev[b] = nl[b]
                     if rem[b]:
                         rem[b] = self.tok.consume(rem[b], nl[b])
                     if rep_guard and repetition(gen[b], tok_len):
@@ -1082,6 +1155,8 @@ def main():
     ap.add_argument("--rep-guard", dest="rep_guard", action="store_true", default=True, help="decode-time repetition guard (default on)")
     ap.add_argument("--no-rep-guard", dest="rep_guard", action="store_false")
     ap.add_argument("--beam", type=int, default=1, help="beam width (1 = greedy); score = sum of log-probs incl. the stop token")
+    ap.add_argument("--project-cache", type=float, default=0.0, help="λ of the project bigram cache mixed into the decode distribution (0 = off)")
+    ap.add_argument("--cache-data", help="encoded shards dir with the test fold (default ~/work/ml-data/<lang>/bpe16k)")
     ap.add_argument("--typed-extras", dest="typed_extras", action="store_true", default=True,
                     help="extra typed-space / mid-ident positions outside the totals (default on)")
     ap.add_argument("--no-typed-extras", dest="typed_extras", action="store_false")
@@ -1123,8 +1198,19 @@ def main():
     print(f"{len(main_pos)} positions (+{n_extra}) in {len({p['fi'] for p in positions})} files, "
           f"{time.time() - t0:.0f} s; healed (typed remainder non-empty): {sum(1 for p in main_pos if p['typed'])} main positions", flush=True)
 
+    cache = None
+    if a.project_cache > 0:
+        assert a.beam == 1, "project cache is implemented for greedy decoding only"
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train"))
+        import data as D
+        lang_dir = {"go": "go", "csharp": "csharp"}[a.lang]
+        cache = ProjectCache(D.Shards(a.cache_data or os.path.join(DATA, lang_dir, "bpe16k"), "test"), tok.vocab_size)
+        t0 = time.time()
+        for r in sorted({p["repo"] for p in positions}):
+            cache.repo(r)
+        print(f"project cache: {len(cache.by_repo)} repositories, built in {time.time() - t0:.0f} s", flush=True)
     modes = a.modes.split(",")
-    report = {"info": dict(info, ckpt=a.ckpt, lang=a.lang, vocab=a.vocab, manifest=a.manifest, n_fold_files=len(files),
+    report = {"info": dict(info, ckpt=a.ckpt, lang=a.lang, vocab=a.vocab, manifest=a.manifest, n_fold_files=len(files), project_cache=a.project_cache,
                            n_positions=len(main_pos), n_in_string=n_extra["in-string"], n_extra=n_extra,
                            n_files=len({p["fi"] for p in main_pos}), stride=a.stride, seed=a.seed, ctx=a.ctx,
                            suffix_tokens=a.suffix_tokens, max_prefix=a.max_prefix, max_new=a.max_new, batch=a.batch, modes=modes,
@@ -1138,6 +1224,7 @@ def main():
         assert max(map(len, prompts)) + a.max_new <= max_context, (max(map(len, prompts)), a.max_new, max_context)
         true_first = [true_first_id(tok, p, heal) for p in allpos]
         constraints = [p["typed"] if heal else b"" for p in allpos]
+        pos_caches = [cache.for_position(p["repo"], p["path"]) for p in allpos] if cache else None
         t_prompt = time.time() - t0
         report["info"]["time_prompts_s"] += t_prompt
         order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))   # length-sorted batches: less padding
@@ -1150,7 +1237,8 @@ def main():
             if a.beam > 1:
                 res = gen.generate_beam([prompts[i] for i in idx], a.max_new, a.beam, true_first=tf, constraints=cons, rep_guard=a.rep_guard)
             else:
-                res = gen.generate([prompts[i] for i in idx], a.max_new, true_first=tf, constraints=cons, rep_guard=a.rep_guard)
+                res = gen.generate([prompts[i] for i in idx], a.max_new, true_first=tf, constraints=cons, rep_guard=a.rep_guard,
+                                   caches=[pos_caches[i] for i in idx] if pos_caches else None, cache_lambda=a.project_cache)
             for i, r in zip(idx, res):
                 results[i] = r
             if (k // a.batch) % 50 == 0:

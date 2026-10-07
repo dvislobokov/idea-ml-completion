@@ -631,6 +631,14 @@ caret**: the editor pairs `)`; `trimClosersAfterCaret` drops the suggestion tail
 0.8 (table in docs/NN-COMPLETION-API.md: Go 25.8 % shown / 93.5 % exact, C# 14.2 % / 94.4 %); dropping the newline probability from
 the product does not improve the trade-off. Heal-parity fixture regenerated with go31m-e2 (`make_parity_heal.py --heal word-eol`).
 
+**Project bigram cache at decode time — negative result** (`eval_inline.py --project-cache λ`, `ProjectCache`: bigram counts over the BPE
+tokens of the other files of the same repository, the completed file subtracted, mixed as p = (1−λ)·p_model + λ·p_cache(prev)):
+Go go31m-e2 63.6 → 63.4 % (λ 0.1) / 63.5 % (0.2), C# cs31m-e2-lr2e3 50.2 → 50.3 % (0.05) / 50.2 % (0.1); paired flips Go +3 / −8,
+C# +6 / −5 of 3 000 — the model already has the local statistics of the file, and the missing facts (member and argument names) are not
+bigram-shaped. The mixture also caps every token probability at 1−λ+λ·p_cache, which collapses the confidence gate (Go at ≥ 0.7: 43.8 → 20.3 %
+shown). Not implemented in `ml-core`; the project/dependency *name* information is better used as structure in the prompt (signatures,
+member lists) and as a filter after `.` (PSI candidates) — the next experiments.
+
 **DDP** (`train.py` under `torchrun --nproc_per_node 2`): data groups striped by rank (`PackedStream(rank, world_size)`, unit test
 `test_ddp_striping`), `--tokens-per-step` stays the global batch, rank 0 builds the path-token cache and writes checkpoints carrying every rank's stream
 state (resume only with the same world size), loss all-reduced for logging, eval/metrics on rank 0, `require_backward_grad_sync` once per step.
