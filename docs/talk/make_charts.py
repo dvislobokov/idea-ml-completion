@@ -319,10 +319,11 @@ bars(ax, thr2, [[129, 85, 46, 18, 4], [9, 4, 1, 0, 0]], [GREY, VIO], ["неве�
 ax.set_title("Roslyn-фильтр «строка разрешается?» снимает 1 из 46 ошибок при гейте 0.7: ошибки — валидный, но чужой код", loc="left", color=INK, fontsize=10.5)
 save(fig, "roslyn_filter.svg")
 
-# ---------- 29. C# ranker: proxy vs real preliminary (CHANGELOG e15, CLAUDE.md e18 state) ----------
-fig, ax = plt.subplots(figsize=(9, 4.4))
-bars(ax, ["правила плагина", "cs-rank-e18-pre\n(83 репо, 14 k списков)"], [[0.567, 0.743], [0.409, 0.625]], [CS, YEL], ["MRR", "top-1"], fmt="{:.3f}", ylim=(0, 1))
-ax.set_title("C#, предварительно (экспорт ещё идёт): реальные списки → MRR 0.743 против правил 0.567", loc="left", color=INK, fontsize=11)
-save(fig, "ranker_cs_pre.svg")
+# ---------- 29. C# ranker e18 on real lists (CHANGELOG e18, 4 670 test lists) ----------
+fig, ax = plt.subplots(figsize=(10, 4.6))
+labels = ["правила плагина", "только n-gram LM", "самый частый\nв файле", "e18 ranker\n(реальные списки, 224 веса)"]
+bars(ax, labels, [[0.526, 0.253, 0.442, 0.711], [0.367, 0.176, 0.279, 0.588], [0.718, 0.313, 0.639, 0.870]], [CS, AQUA, YEL], ["MRR", "top-1", "top-5"], fmt="{:.3f}", ylim=(0, 1.05))
+ax.set_title("C#, 127 репо / 22 081 список, сплит 4:1 по репозиториям: ranker 0.711 MRR против правил 0.526", loc="left", color=INK, fontsize=11)
+save(fig, "ranker_cs_e18.svg")
 
 print("charts:", len(os.listdir(OUT)))
