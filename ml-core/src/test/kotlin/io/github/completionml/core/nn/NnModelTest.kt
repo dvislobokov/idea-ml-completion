@@ -46,8 +46,11 @@ class NnModelTest {
 
     @Test fun writeReadRoundTrip() {
         val mapped = NnFormat.mapFiles
+        // Windows: a mapped file cannot be replaced while a mapping lives (that is why NnFormat does not map there), so only the
+        // copying path is exercised; elsewhere both paths must survive a rewrite of the file while earlier models are alive.
+        val windows = System.getProperty("os.name", "").lowercase().startsWith("windows")
         try {
-            for (map in listOf(true, false)) { NnFormat.mapFiles = map; writeReadRoundTrip(map) }
+            for (map in if (windows) listOf(false) else listOf(true, false)) { NnFormat.mapFiles = map; writeReadRoundTrip(map) }
         } finally { NnFormat.mapFiles = mapped }
     }
 
