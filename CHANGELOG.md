@@ -622,6 +622,12 @@ GPUs at 1.5 M tok/s): eval ppl 3.60 / FIM 3.77 (31 M: 3.80 / 3.98, −5 %). Stan
 (40.9 %). +1.4 / +2.6 p.p. for 1.7× the compute and ~19 MB more in the jar: capacity is not the C# bottleneck, knowledge of the project
 is. Published as `models/cs-nn-50m-e3-lr2e3.cml` (the optional big model); the 31 M stays the default.
 
+**go50m** (`go50m-e3-lr2e3`: go50m preset, the lr2e3 recipe, 6.85 G tokens, 89 min on both GPUs while the C# list export loaded the CPU):
+eval ppl 2.83 / FIM 3.12 (31 M: 2.99 / 3.30). Standard 3 000 positions (SPM, healing): rest of line exact **65.7 %** (go31m-e2 63.6 %),
+≤ 8 tokens 76.3 % (74.8 %), first token 0.890 (0.881), prod ≥ 0.7: 45.3 % shown / 95.9 % exact (43.8 / 95.7), plain mode 61.8 % (60.0 %);
+fresh repositories 59.2 % (56.6 %), ≤ 8 tokens 71.7 % (69.6 %). +2.1 / +2.6 p.p. — Go gains more from capacity than C# (+1.4 / +2.6).
+Published as `models/go-nn-50m-e3-lr2e3.cml` (optional big model; the 31 M stays the default for weaker laptops).
+
 **First live run of go-nn-31m-e2 in the Go plugin (0.2.199–0.2.202, reported by the plugin agent) → three engine changes** (`NnCompletion`,
 mirrored in the harness): (1) **word-start healing** — `return le⟨⟩` is a pre-token boundary (the word ends at the caret), so the model
 continued a finished ` le` with `(` (confProd 0.003–0.05) while `len` typed gave `(o.items)` at 0.73; `Options.healMode = WORD_EOL`
