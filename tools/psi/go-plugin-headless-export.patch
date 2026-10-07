@@ -1,0 +1,414 @@
+diff --git a/go-psi-ide/build.gradle.kts b/go-psi-ide/build.gradle.kts
+index e5405a0..816fb61 100644
+--- a/go-psi-ide/build.gradle.kts
++++ b/go-psi-ide/build.gradle.kts
+@@ -61,12 +61,15 @@ sourceSets {
+ val corpusTestPattern = "*CorpusTest"
+ /** Offline ML dataset export (package io.github.golangsupport.ml, https://github.com/dvislobokov/idea-ml-completion/blob/main/docs/ADAPTER.md): runs only through `mlDataset`. */
+ val mlDatasetPattern = "*MlDatasetExport"
++/** Offline PSI-context dump for the neural model (same package): runs only through `mlContext`. */
++val mlContextPattern = "*MlContextExport"
+ 
+ tasks.test {
+     filter {
+         excludeTestsMatching(corpusTestPattern)
+         excludeTestsMatching(benchmarkPattern)
+         excludeTestsMatching(mlDatasetPattern)
++        excludeTestsMatching(mlContextPattern)
+     }
+     // GoMlCompletionRankerTest completes over real models when told where they are (`-Pml.models=<dir>`); skipped otherwise
+     (providers.gradleProperty("ml.models").orNull ?: providers.systemProperty("ml.models").orNull)?.let { systemProperty("ml.models", it) }
+@@ -190,6 +193,47 @@ intellijPlatformTesting {
+             }
+         }
+ 
++        register("mlContext") {
++            // The installed IDE from localIdePath when it exists (nothing is downloaded), like the compile platform.
++            val localIde = providers.gradleProperty("localIdePath").orNull?.takeIf { file(it).exists() }
++            if (localIde != null) {
++                localPath = file(localIde)
++            } else {
++                type = org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdea
++                version = libs.versions.intellijPlatform
++            }
++
++            task {
++                description = "Dumps the PSI context of sampled cursor positions (*MlContextExport) as JSONL: -Pml.repos=<list> [-Pml.data -Pml.out -Pml.positions -Pml.stride -Pml.maxFiles -Pml.seed -Pml.maxMembers]."
++                group = "verification"
++                val testSourceSet = sourceSets.test.get()
++                testClassesDirs = testSourceSet.output.classesDirs
++                classpath += tasks.test.get().classpath
++                useJUnit()
++                isScanForTestClasses = false
++                include("**/*MlContextExport.class")
++                filter {
++                    includeTestsMatching(mlContextPattern)
++                }
++                outputs.upToDateWhen { false }
++                maxHeapSize = providers.gradleProperty("ml.heap").orNull ?: "6g"
++                val mlProps = listOf("repos", "data", "out", "positions", "stride", "maxFiles", "seed", "maxMembers")
++                    .mapNotNull { k -> providers.gradleProperty("ml.$k").orNull?.let { "-Dml.$k=$it" } }
++                jvmArgumentProviders.add(
++                    CommandLineArgumentProvider {
++                        listOf(
++                            "-Dgopsi.goroot=${goroot.get()}",
++                            "-Dgopsi.gomodcache=${gomodcache.get()}",
++                            "-Didea.max.intellisense.filesize=20000",
++                        ) + mlProps
++                    },
++                )
++                testLogging {
++                    showStandardStreams = true
++                }
++            }
++        }
++
+         register("benchmark") {
+             // The installed IDE from localIdePath when it exists (nothing is downloaded), like the compile platform.
+             val localIde = providers.gradleProperty("localIdePath").orNull?.takeIf { file(it).exists() }
+diff --git a/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlDatasetExport.kt b/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlDatasetExport.kt
+index 3c9e6c8..68449de 100644
+--- a/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlDatasetExport.kt
++++ b/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlDatasetExport.kt
+@@ -69,8 +69,13 @@ class GoMlDatasetExport : GoSemanticIdeTestBase() {
+             val shard = File(out, "$repo.cmlx")
+             if (shard.exists()) { println("ml: skip $repo (shard exists)"); continue }
+             val stats = Stats()
+-            ExampleShards.Writer(shard, GoMlLanguage.id, "idea-golang-support GoMlDatasetExport lm=${File(lmFile).name}", GoMlFeatures.schema, withNames).use { writer ->
+-                exportRepository(dir, extractor, writer, stats)
++            try {
++                ExampleShards.Writer(shard, GoMlLanguage.id, "idea-golang-support GoMlDatasetExport lm=${File(lmFile).name}", GoMlFeatures.schema, withNames).use { writer ->
++                    exportRepository(dir, extractor, writer, stats)
++                }
++            } catch (e: Throwable) {
++                // one repository must not end the whole export (e.g. a logged error turned into an exception by the test logger)
++                println("ml: $repo FAILED ${e.javaClass.simpleName}: ${e.message?.lineSequence()?.firstOrNull()?.take(200)}")
+             }
+             println("ml: $repo ${stats.summary()}")
+             total.add(stats)
+@@ -88,7 +93,8 @@ class GoMlDatasetExport : GoSemanticIdeTestBase() {
+ 
+     /** Copies the repository's Go files into a temporary content root (the corpus stays untouched) and exports every file. */
+     private fun exportRepository(repoDir: File, extractor: FeatureExtractor, writer: ExampleShards.Writer, stats: Stats) {
+-        val tmp = FileUtil.createTempDirectory("gopsi-ml-", null, true)
++        // a unique directory per repository: the same path reused after a bulk deletion confuses cached values captured on the old VFS entries
++        val tmp = FileUtil.createTempDirectory("gopsi-ml-${repoDir.name}-", null, true)
+         val sources = ArrayList<File>()
+         repoDir.walkTopDown().onEnter { d -> !d.name.startsWith(".") && d.name != "vendor" && d.name != "testdata" && d.name != "node_modules" }.forEach { f ->
+             if (f.isFile && f.name.endsWith(".go") || f.isFile && (f.name == "go.mod" || f.name == "go.work")) {
+diff --git a/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlContextExport.kt b/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlContextExport.kt
+new file mode 100644
+index 0000000..9a62777
+--- /dev/null
++++ b/go-psi-ide/src/test/kotlin/io/github/golangsupport/ml/GoMlContextExport.kt
+@@ -0,0 +1,310 @@
++package io.github.golangsupport.ml
++
++import com.google.gson.GsonBuilder
++import com.intellij.openapi.util.io.FileUtil
++import com.intellij.openapi.vfs.LocalFileSystem
++import com.intellij.openapi.vfs.VfsUtil
++import com.intellij.openapi.vfs.newvfs.impl.VfsRootAccess
++import com.intellij.psi.PsiElement
++import com.intellij.psi.PsiManager
++import com.intellij.psi.util.PsiTreeUtil
++import com.intellij.testFramework.IndexingTestUtil
++import com.intellij.testFramework.PsiTestUtil
++import io.github.completionml.core.spi.MlToken
++import io.github.completionml.core.spi.TokenKind
++import io.github.golangsupport.ide.GoSemanticIdeTestBase
++import io.github.golangsupport.ide.completion.GoScopeCandidates
++import io.github.golangsupport.ide.documentation.GoDocSignature
++import io.github.golangsupport.ide.inspections.GoAnalysisScope
++import io.github.golangsupport.lang.psi.GoExpression
++import io.github.golangsupport.lang.psi.GoFile
++import io.github.golangsupport.lang.psi.GoFunctionLit
++import io.github.golangsupport.lang.psi.GoFunctionOrMethodDeclaration
++import io.github.golangsupport.lang.psi.GoNamedElement
++import io.github.golangsupport.lang.psi.GoReferenceExpression
++import io.github.golangsupport.lang.psi.GoTypeReferenceExpression
++import io.github.golangsupport.semantic.api.GoSemanticService
++import io.github.golangsupport.semantic.psi.GoPsiUtil
++import io.github.golangsupport.semantic.resolve.GoResolver
++import io.github.golangsupport.semantic.scope.GoPackageModel
++import io.github.golangsupport.semantic.types.GoPointerType
++import io.github.golangsupport.semantic.types.GoStructType
++import io.github.golangsupport.semantic.types.GoType
++import io.github.golangsupport.semantic.types.GoUnknownType
++import java.io.File
++import java.util.Random
++
++/**
++ * Offline "PSI context" dump for the neural completion model (idea-ml-completion `docs/NEURAL-RU.md` §7, item 2): what the
++ * plugin's own PSI knows at a sampled cursor position — enclosing function, qualifier type and its members at `.`,
++ * expected type, declarations in scope, imports, signatures of symbols the current function uses from other files.
++ * One JSON line per position; the training side uses it to design the prompt format and to measure how many identifiers
++ * of the true rest-of-line the PSI context contributes beyond the file prefix.
++ *
++ * Not a test of behaviour: the `testIde` task `:go-psi-ide:mlContext` runs it, the regular `test` task excludes `*MlContextExport`.
++ *
++ * System properties (set by Gradle from `-Pml.*`):
++ *  - `ml.repos`      file with repository directory names, one per line
++ *  - `ml.data`       corpus root containing `repos/<name>/` (default `../ml-data/go`)
++ *  - `ml.out`        output JSONL file (appended per repository; repositories already present are skipped)
++ *  - `ml.positions`  total positions to sample over all repositories (2000); `ml.stride` every n-th lexer token is a candidate (50)
++ *  - `ml.maxFiles`   files per repository (0 = all), `ml.seed` (7), `ml.maxMembers` cap of member/scope lists (60; package-level list: half of it)
++ *
++ * Positions follow `tools/nn/eval/eval_inline.py`: token `k·stride` of the file, cursor after the previous token of the same
++ * line (or after the indentation when the token starts the line); positions whose rest of line holds no code are skipped.
++ */
++class GoMlContextExport : GoSemanticIdeTestBase() {
++
++    private val data = File(System.getProperty("ml.data") ?: "../ml-data/go")
++    private val reposFile = System.getProperty("ml.repos")
++    private val out = File(System.getProperty("ml.out") ?: File(data, "psi/context.jsonl").path)
++    private val positionsWanted = System.getProperty("ml.positions")?.toInt() ?: 2000
++    private val stride = System.getProperty("ml.stride")?.toInt() ?: 50
++    private val maxFiles = System.getProperty("ml.maxFiles")?.toInt() ?: 0
++    private val seed = System.getProperty("ml.seed")?.toLong() ?: 7L
++    private val maxMembers = System.getProperty("ml.maxMembers")?.toInt() ?: 60
++    private val gson = GsonBuilder().disableHtmlEscaping().create()
++
++    private val semantic get() = GoSemanticService.getInstance(project)
++
++    fun testExport() {
++        println("ml: classpath=" + System.getProperty("java.class.path"))
++        requireNotNull(reposFile) { "-Pml.repos=<file with repository names> is required" }
++        val repos = File(reposFile).readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
++        out.parentFile?.mkdirs()
++        val done = if (out.exists()) out.readLines().mapNotNull { Regex("\"repo\":\"([^\"]+)\"").find(it)?.groupValues?.get(1) }.toSet() else emptySet()
++        val perRepo = (positionsWanted + repos.size - 1) / repos.size
++        val t0 = System.currentTimeMillis()
++        var total = 0; var failed = 0
++        for (repo in repos) {
++            val dir = File(data, "repos/$repo")
++            if (!dir.isDirectory) { println("ml: skip $repo (no directory)"); continue }
++            if (repo in done) { println("ml: skip $repo (already in ${out.name})"); continue }
++            val records = ArrayList<String>()
++            try {
++                exportRepository(repo, dir, perRepo, records)
++            } catch (e: Throwable) {
++                failed++
++                println("ml: $repo FAILED ${e.javaClass.simpleName}: ${e.message?.take(200)}")
++            }
++            out.appendText(records.joinToString("") { it + "\n" })
++            total += records.size
++            println("ml: $repo positions=${records.size}")
++        }
++        println("ml: TOTAL positions=$total repos=${repos.size} failed=$failed in ${(System.currentTimeMillis() - t0) / 1000} s; $out")
++    }
++
++    /** Copies the repository's Go files into a temporary content root (the corpus stays untouched). */
++    private fun exportRepository(repo: String, repoDir: File, quota: Int, records: MutableList<String>) {
++        val tmp = FileUtil.createTempDirectory("gopsi-ctx-$repo-", null, true)
++        val sources = ArrayList<Pair<File, String>>()
++        repoDir.walkTopDown().onEnter { d -> !d.name.startsWith(".") && d.name != "vendor" && d.name != "testdata" && d.name != "node_modules" }.forEach { f ->
++            if (f.isFile && (f.name.endsWith(".go") || f.name == "go.mod" || f.name == "go.work")) {
++                val rel = f.relativeTo(repoDir).path
++                val dst = File(tmp, rel); dst.parentFile.mkdirs(); f.copyTo(dst)
++                if (f.name.endsWith(".go") && f.length() in 200..400_000) sources.add(dst to rel)
++            }
++        }
++        VfsRootAccess.allowRootAccess(testRootDisposable, tmp.path)
++        val root = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(tmp)!!
++        VfsUtil.markDirtyAndRefresh(false, true, true, root)
++        PsiTestUtil.addContentRoot(myFixture.module, root)
++        try {
++            IndexingTestUtil.waitUntilIndexesAreReady(project)
++            val files = sources.sortedBy { it.second }.let { if (maxFiles > 0) it.take(maxFiles) else it }
++            // candidate positions: (file, token index k·stride) over all files; uniform sample of `quota`
++            val rnd = Random(seed xor repo.hashCode().toLong())
++            data class Cand(val file: File, val rel: String, val text: String, val tokens: List<MlToken>)
++            val cands = ArrayList<Cand>(); val pairs = ArrayList<Pair<Int, Int>>()
++            for ((file, rel) in files) {
++                val text = file.readText().replace("\r\n", "\n")
++                if (GoAnalysisScope.isGenerated(text)) continue
++                val tokens = GoMlLanguage.tokenizer.tokens(text)
++                val ci = cands.size; cands.add(Cand(file, rel, text, tokens))
++                var k = stride
++                while (k < tokens.size) { pairs.add(ci to k); k += stride }
++            }
++            val picked = (if (pairs.size <= quota) pairs else pairs.shuffled(rnd).take(quota)).groupBy({ it.first }, { it.second })
++            for ((ci, idxs) in picked.toSortedMap()) {
++                val c = cands[ci]
++                val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(c.file) ?: continue
++                val psi = PsiManager.getInstance(project).findFile(vf) as? GoFile ?: continue
++                for (i in idxs.sorted()) {
++                    val rec = runCatching { position(repo, c.rel, c.text, c.tokens, i, psi) }
++                        .getOrElse { e -> mapOf("repo" to repo, "path" to c.rel, "error" to "${e.javaClass.simpleName}: ${e.message?.take(200)}") }
++                    if (rec != null) records.add(gson.toJson(rec))
++                }
++            }
++        } finally {
++            PsiTestUtil.removeContentEntry(myFixture.module, root)
++            FileUtil.delete(tmp)
++        }
++    }
++
++    private class Timer { val t0 = System.nanoTime(); var last = t0; val ms = LinkedHashMap<String, Double>()
++        fun lap(name: String) { val now = System.nanoTime(); ms[name] = (now - last) / 1e6; last = now }
++        fun total() { ms["total"] = (System.nanoTime() - t0) / 1e6 } }
++
++    /** One record, or null when the position has no code in the rest of its line. */
++    private fun position(repo: String, rel: String, text: String, tokens: List<MlToken>, j: Int, file: GoFile): Map<String, Any?>? {
++        val t = tokens[j]
++        val bol = text.lastIndexOf('\n', t.offset - 1) + 1
++        val eol = text.indexOf('\n', t.offset).let { if (it < 0) text.length else it }
++        val prev = if (j > 0) tokens[j - 1] else null
++        // the lexer normalises literal texts, so the end of the previous token is the last non-blank character before this one
++        var end = t.offset
++        while (end > bol && text[end - 1].isWhitespace()) end--
++        val cursor: Int; val kind: String
++        if (prev == null || end == bol) {
++            cursor = t.offset; kind = "line-start"
++        } else {
++            cursor = end
++            kind = when {
++                prev.text == "." -> "after-dot"
++                prev.text in setOf("(", "[", "{") -> "after-open"
++                prev.text == "," -> "after-comma"
++                prev.text in setOf("=", ":=", "+=", "-=", "*=", "/=", "|=", "&=", "<-") -> "after-assign"
++                prev.kind == TokenKind.KEYWORD -> "after-keyword"
++                prev.kind == TokenKind.IDENT -> "after-ident"
++                else -> "after-other"
++            }
++        }
++        val rest = text.substring(cursor, eol)
++        if (rest.isBlank() || rest.trimStart().startsWith("//")) return null
++        val timer = Timer()
++        val rec = LinkedHashMap<String, Any?>()
++        rec["repo"] = repo; rec["path"] = rel; rec["cursor"] = cursor; rec["line_no"] = text.substring(0, cursor).count { it == '\n' } + 1
++        rec["kind"] = kind; rec["is_test"] = rel.endsWith("_test.go")
++        rec["line"] = text.substring(bol, eol); rec["true_rest"] = rest
++
++        val leafBefore = file.findElementAt((cursor - 1).coerceAtLeast(0)) ?: return rec
++        // the leaf of the first token after the cursor (what the user is about to type)
++        var next = cursor
++        while (next < eol && text[next].isWhitespace()) next++
++        val leafAt = file.findElementAt(next)
++        // 1. enclosing function
++        val owner = GoPsiUtil.functionOwner(leafBefore)
++        rec["func"] = when (owner) {
++            is GoFunctionOrMethodDeclaration -> GoDocSignature.definition(owner, true)
++            is GoFunctionLit -> "func literal " + render(semantic.typeOf(owner)) +
++                (PsiTreeUtil.getParentOfType(owner, GoFunctionOrMethodDeclaration::class.java)?.let { " in " + GoDocSignature.definition(it, true) } ?: "")
++            else -> null
++        }
++        timer.lap("func")
++        // 2. qualifier at `.`-positions: the reference the real identifier belongs to, its qualifier's type and members
++        if (kind == "after-dot" && leafAt != null) rec["qualifier"] = qualifier(leafAt, file)
++        timer.lap("qual")
++        // 3. expected type of the expression at the cursor
++        rec["expected"] = expected(leafAt, leafBefore)
++        timer.lap("exp")
++        // 4. declarations in scope: locals declared before the cursor, then the package level
++        rec["scope"] = scope(leafBefore, file, cursor, rel)
++        timer.lap("scope")
++        // 5. imports
++        rec["imports"] = file.imports.map { s -> mapOf("p" to s.path, "a" to s.alias) }
++        // 6. symbols referenced in the current function that live in other files
++        val topLevel = PsiTreeUtil.findFirstParent(leafBefore) { it.parent is GoFile }
++        rec["xrefs"] = xrefs(owner ?: topLevel ?: file, file, cursor)
++        timer.lap("xref")
++        // 7. identifiers of the true rest of line: present in the file prefix or not
++        val before = HashSet<String>(); for (k in 0 until j) if (tokens[k].kind == TokenKind.IDENT) before.add(tokens[k].text)
++        rec["rest_idents"] = tokens.asSequence().drop(j).takeWhile { it.offset < eol }.filter { it.kind == TokenKind.IDENT && it.offset >= cursor }
++            .map { mapOf("n" to it.text, "p" to (it.text in before)) }.toList()
++        timer.total()
++        rec["ms"] = timer.ms.mapValues { Math.round(it.value * 100) / 100.0 }
++        return rec
++    }
++
++    private fun render(type: GoType?): String? = type?.takeUnless { it is GoUnknownType }?.let { GoDocSignature.renderType(it) }
++
++    private fun qualifier(leafAt: PsiElement, file: GoFile): Map<String, Any?>? {
++        val ref = PsiTreeUtil.getParentOfType(leafAt, GoReferenceExpression::class.java, false)
++        val typeRef = PsiTreeUtil.getParentOfType(leafAt, GoTypeReferenceExpression::class.java, false)
++        val qualifier: GoReferenceExpression? = ref?.expression as? GoReferenceExpression ?: typeRef?.referenceExpression
++        val qualifierExpr = ref?.expression ?: typeRef?.referenceExpression ?: return null
++        val res = LinkedHashMap<String, Any?>()
++        res["text"] = qualifierExpr.text.take(80)
++        val members = ArrayList<Map<String, String?>>()
++        var total = 0
++        val pkg = qualifier?.let { q -> GoResolver.getInstance(project).resolveReferenceExpression(q).firstNotNullOfOrNull { r ->
++            when (r) { is GoResolver.Result.Import -> GoPackageModel.getInstance(project).resolveImport(r.element.path, file); is GoResolver.Result.Package -> r.pkg; else -> null } } }
++        if (pkg != null) {
++            res["package"] = pkg.importPath
++            val decls = GoPackageModel.getInstance(project).scopeOf(pkg).allDeclarations().filter { it.isPublic() }.sortedBy { it.name }.toList()
++            total = decls.size
++            for (d in decls.take(maxMembers)) members.add(mapOf("n" to d.name, "s" to GoDocSignature.definition(d, true)?.take(100)))
++        } else {
++            val type = semantic.typeOf(qualifierExpr)
++            res["type"] = render(type)
++            if (type !is GoUnknownType) {
++                val seen = HashSet<String>()
++                fun fields(t: GoType, depth: Int) {
++                    val u = (t.underlying() as? GoPointerType)?.elem?.underlying() ?: t.underlying()
++                    val st = u as? GoStructType ?: return
++                    for (f in st.fields) {
++                        if (seen.add(f.name)) { total++; if (members.size < maxMembers) members.add(mapOf("n" to f.name, "s" to "field ${f.name} ${render(f.type)}")) }
++                        if (f.embedded && depth < 4) fields(f.type, depth + 1)
++                    }
++                }
++                fields(type, 0)
++                for (m in semantic.methodsOf(type)) if (seen.add(m.name)) { total++; if (members.size < maxMembers) members.add(mapOf("n" to m.name, "s" to "func ${m.name}" + render(m.signature)?.removePrefix("func"))) }
++            }
++        }
++        res["members"] = members; res["total"] = total
++        return res
++    }
++
++    private fun expected(leafAt: PsiElement?, leafBefore: PsiElement): String? {
++        val expr = leafAt?.let { PsiTreeUtil.getParentOfType(it, GoExpression::class.java, false) }
++            ?: PsiTreeUtil.getParentOfType(leafBefore, GoReferenceExpression::class.java, false)
++            ?: return null
++        return render(semantic.expectedTypeAt(expr))
++    }
++
++    private fun kindOf(d: GoNamedElement): String = d.javaClass.simpleName.removePrefix("Go").removeSuffix("Impl").removeSuffix("Definition").removeSuffix("Declaration").lowercase()
++
++    private fun scope(leafBefore: PsiElement, file: GoFile, cursor: Int, rel: String): Map<String, Any?> {
++        val locals = ArrayList<Map<String, Any?>>()
++        val lineOf = { off: Int -> file.text.let { t -> var n = 0; var i = t.indexOf('\n'); while (i in 0 until off) { n++; i = t.indexOf('\n', i + 1) }; n } }
++        val cursorLine = lineOf(cursor)
++        val seen = HashSet<String>()
++        GoScopeCandidates.walkLocals(leafBefore) { d, level ->
++            val off = d.textOffset
++            if (off < cursor && seen.add(d.name ?: return@walkLocals) && locals.size < maxMembers) {
++                locals.add(mapOf("n" to d.name, "k" to (if (level == 1) "param" else kindOf(d)), "t" to render(semantic.declarationType(d)), "d" to cursorLine - lineOf(off)))
++            }
++        }
++        val pkg = ArrayList<Map<String, Any?>>()
++        val all = GoPackageModel.getInstance(project).scopeOf(file).allDeclarations().toList()
++        val thisPath = file.virtualFile?.path
++        // same-file declarations first, nearest to the cursor first; other files of the package alphabetically
++        val sorted = all.sortedWith(compareBy({ if (it.containingFile?.virtualFile?.path == thisPath) 0 else 1 },
++            { if (it.containingFile?.virtualFile?.path == thisPath) Math.abs(cursor - it.textOffset) else 0 }, { it.name }))
++        for (d in sorted.take(maxMembers / 2)) {
++            val same = d.containingFile?.virtualFile?.path == thisPath
++            pkg.add(mapOf("n" to d.name, "s" to GoDocSignature.definition(d, true)?.take(100), "f" to same, "d" to if (same) cursorLine - lineOf(d.textOffset) else null))
++        }
++        return mapOf("locals" to locals, "pkg" to pkg, "pkg_total" to all.size, "pkg_name" to file.packageName)
++    }
++
++    private fun xrefs(owner: PsiElement, file: GoFile, cursor: Int): List<Map<String, Any?>> {
++        val res = ArrayList<Map<String, Any?>>(); val seen = HashSet<String>()
++        val thisPath = file.virtualFile?.path
++        val gorootPrefix = toolchain.goroot.toString()
++        fun add(decl: PsiElement?) {
++            val named = decl as? GoNamedElement ?: return
++            val vf = named.containingFile?.virtualFile ?: return
++            if (vf.path == thisPath || vf.path.endsWith("/builtin/builtin.go")) return
++            val sig = GoDocSignature.definition(named, true)?.take(120) ?: return
++            if (seen.add(sig) && res.size < 30) {
++                val p = vf.path
++                res.add(mapOf("n" to named.name, "s" to sig, "f" to if (p.startsWith(gorootPrefix)) "GOROOT" + p.removePrefix(gorootPrefix) else p.substringAfter("/gopsi-ctx-").substringAfter('/')))
++            }
++        }
++        val refs = PsiTreeUtil.findChildrenOfType(owner, GoReferenceExpression::class.java).filter { it.textRange.startOffset < cursor }
++        for (r in refs) for (e in semantic.resolve(r)) add(e)
++        val typeRefs = PsiTreeUtil.findChildrenOfType(owner, GoTypeReferenceExpression::class.java).filter { it.textRange.startOffset < cursor }
++        for (r in typeRefs) add(semantic.resolve(r))
++        return res
++    }
++}

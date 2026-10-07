@@ -55,11 +55,26 @@ tooling is `ml-train` (Kotlin CLI) plus, for the neural model, PyTorch under `~/
 - Kotlin inference (`ml-core/nn`) reproduces PyTorch (1000/1000 lines); native kernels (`native/`, q8 default) ×3.2: 1 500-token prompt
   + 20 tokens = 167 ms vs 530 ms scalar, 24 ms vs 47 ms while typing (8 threads, this server). NEON / Windows / macOS loading untested.
 - Eval harness for the neural models: `tools/nn/eval/eval_inline.py --lang go|csharp --ckpt … --positions 3000 --modes plain,fim,spm`
-  (~5 min on the GPU); results in `~/work/ml-data/<lang>/nn/eval-inline-step*.md`; parity fixtures in `go/nn/parity/`.
+  (~5 min on the GPU); results in `~/work/ml-data/<lang>/nn/eval-inline-step*.md`; parity fixtures in `go/nn/parity/`, `csharp/nn/parity/`.
+- Token healing (2026-10-07, `ml-core/nn/NnCompletion.kt`, `docs/NN-COMPLETION-API.md`): honest whole-line numbers are Go 61.7 % / C# 47.9 %
+  (rest of line exact, all positions); gate on conf_prod ≥0.8; the plugin provider should call `NnCompletion.complete(path, before, after)`.
+- e17 (2026-10-07): Go ranker on REAL plugin lists exported headless on the server (595 repos, 204 k positions; `tools/psi/`):
+  MRR 0.808 / top-1 0.710 vs rules 0.527 — `go/models/e17-rank.cml` is the one to ship. Proxy-trained rankers do NOT transfer
+  (Go 0.518, C# 0.337 < LM-only) — the C# ranker e15 must be retrained on real lists (e18, exporter prototype in `~/work/nn/psi-cs/`).
+- PSI-context headroom measured (Go, 2 436 positions): 81 % of rest-of-line identifiers are already in the file prefix, PSI adds 4.8 %
+  (12.7 % right after `.`), 14.5 % are nowhere; C# (Roslyn, 3 000 positions): 75 % / 9 % / 16 %. PSI compression is mostly a speed lever;
+  recall needs member lists of resolved third-party types (module cache / NuGet index on the server — 35 % of C# `.`-positions unresolved).
+- Headless plugin builds work on this server: IDEA Community 2026.1.4 at `/root/work/idea` (`-PlocalIdePath`, JBR as JAVA_HOME), Go 1.27.1
+  at `/usr/local/go`, .NET SDK 10, fontconfig. Recipes: `tools/psi/GO-HEADLESS-EXPORT.md`; plugin-side changes are kept as
+  `tools/psi/go-plugin-headless-export.patch` (not committed to the plugin repo).
 - Go plugin (branch `migration`) already runs the ranker behind `-PmlEnabled=true` (models from `../ml-data/go/models`), ML items marked " ML".
 - GigaCode context providers for both plugins are done on branches `gigacode` (Go 0.2.186 in worktree `idea-golang-support-gigacode`,
   C# 0.1.104 in `idea-dotnet-support-gigacode`) on the user's Windows machine only: not merged, not pushed, not verified live with GigaCode.
   Design: compile-only stub module `gigacode-api` mirroring GigaCode 26.9.3 interfaces, optional `<depends>` + `*-gigacode.xml`.
+
+## Server migration (decided 2026-10-07): the user moves to 2 × H200 — follow `docs/MIGRATION-SERVER-RU.md`
+What to copy (~45 GB without corpora), what to re-download, first task on arrival: DDP in `tools/nn/train/train.py`. Stopped before the move:
+agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/psi/REPORT.md` + `~/work/nn/psi-cs/` (copied over).
 
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);

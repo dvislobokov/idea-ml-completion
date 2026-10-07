@@ -488,3 +488,55 @@ probabilities; a repetition guard removes 2.5–2.8 % of lines, all wrong (C# pr
 (`);`, `}`) are 22–25 % of positions and 98 % right at ≥0.8 — showing them is a UX choice. Kotlin: `BpeTokenizer.lastPreTokenBoundary`,
 `VocabPrefixIndex`, `NnCompletion.complete(path, before, after)` → text, conf_prod/conf_min, show decision; parity with Python on 99/99
 healed records (scalar, native f32) and on the C# model (`models/parity-cs`, argmax 32/32, 40/40 lines). API: `docs/NN-COMPLETION-API.md`.
+
+## e17 — Go ranker on real plugin completion lists, 300 + 295 repositories (headless PSI export on the server)
+
+The e10 export (`idea-golang-support`: `go-psi-ide/.../ml/GoMlDatasetExport`, `./gradlew :go-psi-ide:mlDataset`) now runs on the
+server: IntelliJ IDEA Community 2026.1.4 unpacked to `/root/work/idea` (`-PlocalIdePath`), the IDE's JBR as `JAVA_HOME`, Go 1.27.1
+as GOROOT, fontconfig + DejaVu installed (the headless test editor still asks for a font), delve submodule initialised. The export is
+single-threaded, so 10 workers run as plain JVMs with the command line of Gradle's test worker and separate sandbox config/system
+dirs (`~/work/nn/psi/run-export.sh`, `launch-dataset.sh`; setup notes in `~/work/nn/psi/README.md`). Two robustness fixes in the export
+class: a unique temp directory per repository (the reused path `gopsi-ml-/...` after a bulk VFS deletion raised `Incorrect CachedValue use`
+in `GoImportPaths`, which the test logger turns into an exception that ended the run after 3–17 repositories) and a per-repository
+try/catch; the worker JVMs also run with `-Dintellij.testFramework.rethrow.logged.errors=false`.
+
+Data: 300 `rank`-fold repositories sampled from the 7 165 with 20–3000 kept files (seed 17) and all 295 `test`-fold repositories of the
+e14 manifest; ≤ 120 files per repository (alphabetical, non-test, 200 B–400 KB, generated files skipped), 10 positions per file, prefix 0–2
+characters, ≤ 100 candidates (answer kept), LM e14-b (lm fold, cross-fitted), cache λ = 0.3, candidate names stored. Export: 27 ms per
+position; 595 repositories in ~26 min on 10 JVMs (6 GB heap each).
+
+| fold | repos | files | positions | plugin shows a list | answer in list (recall) | lists | candidates / list |
+|---|---|---|---|---|---|---|---|
+| rank | 300 | 20 970 | 204 497 | 66.1 % (28.6 % no list: declaration names etc., 5.3 % single candidate inserted) | 88.6 % | 119 723 | 48.1 |
+| test | 295 | 14 794 | 144 507 | 65.3 % (28.9 % / 5.7 %) | 88.9 % | 83 904 | 46.3 |
+
+External modules are not in a module cache here, so members of third-party types are unresolved (the list then has no such candidate):
+part of the 11 % recall gap. Three repositories gave 0 lists (`cockroachdb__cockroach-gen`, `OpenCSGs__csghub-server`,
+`made-in-bangladesh__made-in-bangladesh`): their first 120 files alphabetically are generated mocks / code.
+
+Ranker: `ml-train l1 --lang go --shards psi/rank --test-shards psi/test` (schema of e10: 13 common + 17 language features × 7 = 210 weights),
+55 s, → `../ml-data/go/models/e17-rank.cml`. Evaluation on the 83 904 test-fold lists:
+
+| order of the list | top-1 | top-5 | MRR |
+|---|---|---|---|
+| plugin rules (expected type → scope level → name, `rule_rank_log`) | 0.388 | 0.685 | 0.527 |
+| n-gram LM e14-b only | 0.396 | 0.608 | 0.499 |
+| most frequent in file | 0.357 | 0.710 | 0.515 |
+| proxy-trained ranker e14-b-rank (13 common features, projected onto the real lists) | 0.390 | 0.666 | 0.518 |
+| **e17 ranker (real lists, 210 weights)** | **0.710** | **0.934** | **0.808** |
+
+Per context kind (e17 / rules MRR): after `.` 0.776 / 0.342, statement start 0.832 / 0.642, argument 0.837 / 0.653, type position
+0.825 / 0.420, assignment rhs 0.780 / 0.490, other 0.786 / 0.500. Heaviest standardised weights: exact-case prefix match +1.51, scope level
+−0.95, declared in file +0.86, in vocabulary +0.73, needs import −0.73, keyword kind −0.69, `after_dot:lm_global_logprob` +0.67.
+Compared with e10 (7 training repositories, 4 held-out): MRR 0.783 → 0.808, top-1 0.675 → 0.710 on a test set 10× larger; the rules
+baseline is unchanged (0.534 → 0.527). The proxy ranker transfers badly to real lists (0.518, below the rules): proxy lists are
+vocabulary-sampled and lack the PSI candidate structure (kinds, scope, expected type), so a plugin ranker must be trained on real lists.
+
+Side result for the neural model (`docs/NEURAL-RU.md` §7 item 2): a PSI-context dump at 2 436 sampled positions of the test fold
+(`GoMlContextExport`, `./gradlew :go-psi-ide:mlContext`, `../ml-data/go/psi/context-test.jsonl`). Resolution cost per position
+(enclosing function, qualifier type + members, expected type, scope, imports, cross-file signatures): median 13.5 ms, p90 77 ms, mean 35 ms
+(first position of a file pays stub/AST loading; the 4 s maximum is a package with 300+ declarations). Of the identifiers in the true
+rest of line, 80.7 % already occur in the file prefix, 4.8 % come only from the PSI context (first identifier: 7.5 %; after `.`: 12.7 %),
+14.5 % from neither (58 % of those are members of a qualifier typed later in the line, 12 % names declared on that line, 9 % calls of
+functions outside the context, 18 % signature parameters / external modules). Expected type is known at 21 % of positions, the
+qualifier's type at 41 % of `.`-positions (+23 % packages; the rest are external modules without a module cache).

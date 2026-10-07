@@ -21,7 +21,7 @@ Whole-line suggestions, Go, 300 held-out repositories, 3 000 positions, same pro
 | model file | 32 MB | 31 MB (int8) |
 | 20-token line, 8 threads, this server — Kotlin / native kernels | — | 530 ms / **167 ms** (while typing, KV cache reused: 47 / 24 ms) |
 
-Completion-list ranking (Go, real plugin lists, held-out repos): MRR 0.783 / top-1 0.675 vs plugin rules 0.534 / 0.394 (e10).
+Completion-list ranking (Go, real plugin lists exported headless from the plugin's PSI, 83 904 lists in 295 held-out repos): MRR **0.808** / top-1 **0.710** vs plugin rules 0.527 / 0.388 (e17). A ranker trained on proxy lists does not transfer (0.518) — real lists are required; the C# ranker (e15) is still proxy-trained.
 C#: n-gram LM 32 MB, proxy-list ranker MRR 0.756 (e15). C# transformer cs31m (same size, secret-scrubbed corpus): whole-line suggestions shown in 18 % of positions at 92 % precision (n-gram: 3 % at 88 %), rest of line exact 49 % vs 32 %, first token 0.72 vs 0.57 — C# is harder for both models, and the transformer fixes the n-gram's arity failures (`)` after the last argument: 65 % vs the n-gram's literal continuation).
 
 ## Layout
@@ -122,6 +122,7 @@ per-file cache LM (λ=0.3), LM / ranker / test on disjoint repository folds, 300
 | e14 full Go corpus (22 610 repos, 3.9 G tokens): token shards, partitioned counting | order 5, 32 MB: ppl 4.1, top-1 0.521 (207 MB unpruned-ish: 3.8 / 0.525); inline at 0.8: 10 % shown, 93 % right; proxy ranker MRR 0.759 |
 | e15 full C# corpus (24 945 repos, 2.95 G tokens), stricter generated-code filters | order 5, 32 MB: ppl 5.9, top-1 0.484 (52 MB: 5.6 / 0.490; 24 MB: 6.1 / 0.483); inline at 0.8: 3 % shown, 88 % right; proxy ranker MRR 0.756 (e12: 0.712) |
 | **e16 own transformer go31m** (d512 × 8, 31 M, BPE 16k, FIM, 6.8 G tokens, 2.5 h on one GPU) | Go: ppl 2.13 (BPE); whole-line suggestions at 95 % precision shown in 32 % of positions (n-gram: 10 %), rest of line exact 66 % vs 35 %; int8 export lossless; Kotlin inference reproduces PyTorch 1000/1000 lines; native kernels ×3.2; with token healing at the cursor (`NnCompletion`) rest of line exact 62 % / 73 % (≤ 8 tokens). **cs31m** (C#, 5.65 G tokens, secret-scrubbed): ppl 3.97; shown 18 % at 92 % (n-gram 3 % at 88 %), rest of line exact 49 % vs 32 % (60 % with token healing) |
+| e17 ranker on real Go completion lists, corpus scale (300 rank + 295 test repos, 120 k + 84 k lists) | test fold: MRR 0.808 vs plugin rules 0.527 vs proxy ranker 0.518 (top-1 0.710 / 0.388 / 0.390, top-5 0.934 / 0.685 / 0.666); PSI context adds only 4.8 % of rest-of-line identifiers beyond the file prefix |
 
 Earlier prototype and scaling tables: `docs/EARLY-RESULTS.md`.
 
