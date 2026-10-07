@@ -76,6 +76,7 @@ class ModelConfig:
 # Named presets. head_dim is 64 everywhere (good for CPU kernels and SDPA); GQA with 2-4 kv heads keeps the KV cache
 # small on the CPU side. Parameter counts (tied embeddings, vocab 16384) are printed by `python model.py`.
 PRESETS = {
+    "go5m":   dict(d_model=256, n_layers=6,  n_heads=4,  n_kv_heads=2, ffn_dim=704),    # ~8 M incl. 4.2 M embeddings: proxy for data/format hypotheses
     "go19m":  dict(d_model=384, n_layers=8,  n_heads=6,  n_kv_heads=2, ffn_dim=1024),   # 18.9 M
     "go31m":  dict(d_model=512, n_layers=8,  n_heads=8,  n_kv_heads=2, ffn_dim=1408),   # 30.9 M
     "go50m":  dict(d_model=640, n_layers=10, n_heads=10, n_kv_heads=2, ffn_dim=1536),   # 49.8 M
