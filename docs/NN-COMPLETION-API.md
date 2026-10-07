@@ -61,6 +61,9 @@ trimClosersAfterCaret = true`.
 | ≥ 0.8 | 20.4 % / 95.3 % | 10.0 % / 97.3 % |
 | ≥ 0.9 | 13.5 % / 96.5 % | 4.9 % / 98.6 % |
 
+  **After a dot** the model is right as often as elsewhere but less sure (many plausible members): at the default 0.7 Go shows 37 % of
+  `.`-positions / 96 % exact, C# 20 % / 98 %; at **0.5** Go 51 % / 92 %, C# 30 % / 96 %. Plugins should pass `showThreshold = 0.5` when the
+  byte before the caret is `.` (`?.`, `::`, `->` in C#) and 0.7 otherwise — per-call options, no engine change.
   Leaving the newline probability out of the product does not improve the curve (at equal show rate the precision is 0.5–1 p.p.
   lower), so the formula stays; the median newline probability on exact lines is 0.96 (p25 0.82). With closers shown
   (`suppressPunctOnly = false`) Go at 0.7 is 43.8 % / 95.8 %. Requires
