@@ -88,6 +88,18 @@ tooling is `ml-train` (Kotlin CLI) plus, for the neural model, PyTorch under `~/
 What to copy (~45 GB without corpora), what to re-download, first task on arrival: DDP in `tools/nn/train/train.py`. Stopped before the move:
 agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/psi/REPORT.md` + `~/work/nn/psi-cs/` (copied over).
 
+## Decisions 2026-10-07 (after the reinstall)
+- Native kernels: SHIP. Verified on a MacBook Pro M1 Pro: dylib loads from the jar, NEON+DotProd self-test passes, scalar/f32 are
+  bit-exact with PyTorch, q8 behaves as VNNI on x86; cs31m line 68 ms native q8 vs 252 ms scalar (docs/MAC-CHECK-RU.md).
+- The repository will carry BOTH a ~30 M and a ~50 M model per language (`models/`); the plugin gets a switch between them later.
+  So the 50 M runs (preset go50m) are part of the queue, not an option.
+- C# experiments e2 started 2026-10-07 10:35 on the two H200s (1.25 M tok/s each, ~75 min per epoch): `cs31m-e2-spm10`
+  (spm-rate 1.0) and `cs31m-e2-lr2e3` (lr 2e-3, 0.5 M tokens/step), both fim 0.7, 1 epoch, logs/ckpts in `~/work/ml-data/csharp/nn/`.
+  Baseline numbers for cs31m-e1 come from CHANGELOG e16 (its .pt checkpoint was lost; only the exported .cml survives in `models/`).
+  Research notes with the ablation order: the user's machine, `~/work/ml-research/architecture-review-2026-10-07.md`.
+- Both runs building `lm.pathtok.u16` at the same time race (os.replace on the .tmp): start the second run a minute later or
+  pre-build the cache once.
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher
