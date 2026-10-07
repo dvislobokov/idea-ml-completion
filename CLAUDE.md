@@ -115,8 +115,21 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
 - Next in the queue (user-approved direction, not yet started): cs50m/go50m with the lr2e3 recipe on DDP; line-aligned FIM middle distribution;
   PSI as validator / constrained decoding measured on re-exported real Go lists (e17 export has to be redone, ~2 h); sequence-level distillation
   from Qwen2.5-Coder-7B with Roslyn/gopls-verified outputs; GBDT ranker + nn feature. 4 × H200: only worth it for the distillation-generation day.
-- Uncommitted as of 14:00: CHANGELOG e18, README row, `eval_hf.py`, `fresh_manifest.py`, beam in `eval_inline.py`, DDP in `train.py`/`data.py`
-  (+ `test_ddp_striping`), README notes, this section. The user commits explicitly.
+- Everything is committed and pushed as it lands (user's rule since 16:00: GitHub is the only durable store; other agents build the plugin
+  repos). Engine `models/`: cs-nn-31m-e2-lr2e3 (default C#), cs-nn-50m-e3-lr2e3 (ppl 3.60, 51.6 %: +1.4 p.p. for 1.7× compute — optional),
+  go-nn-31m-e2 (ppl 2.99, 63.6 %), go-16384.bpe, n-grams, proxy rankers; the same files in `idea-dotnet-support/ml-models/csharp` and
+  `idea-golang-support/ml-models/go`. go50m-e3-lr2e3 trains 16:40–18:00 (`go50m-queue`), publish it the same way.
+- Live-run feedback from the Go plugin agent (0.2.199–0.2.202) → `NnCompletion`: `healMode WORD_EOL` (heal from the word start when only
+  closers follow the caret), `trimClosersAfterCaret`, default gate 0.7; harness `--heal word-eol` default; heal-parity fixture at
+  `~/work/ml-data/go/nn/parity-heal` (go31m-e2; test needs `CML_NN_MODEL=…/go/models/go31m-e2.cml`, run with `:ml-core:cleanTest`).
+- .NET plugin agent delivered the e18 export (`CSharpMlFeatures` 19 language features, `mlDataset` Gradle task, test-scope exporter;
+  tests pass on the server). Export running in 8 git worktrees `/root/work/dotnet-wt/<n>` (units `cs-export-0..7`, script
+  `~/work/cs-export-worker.sh`, lists `csharp/psi/lists/`, shards `csharp/psi/{rank,test}/*.cmlx` with candidate names): ~0.6 repos/min in
+  total (the exporter copies + indexes the whole repository per repo), rank 300 repos ≈ 8 h, test cut to 100 repos. Then
+  `ml-train l1 --lang csharp --shards csharp/psi/rank --test-shards csharp/psi/test` → e18 ranker; the plugin side (weigher) follows.
+- Plugin tasks written for other agents: `idea-dotnet-support/ML_INLINE_TASK.md`, `ML_RANKER_EXPORT_TASK.md` (done), `idea-golang-support/ML_INLINE_TASK.md`.
+- Known gotchas: two evals must not share `--scratch` (checkpoint copy race); Gradle test env/fixture changes need `cleanTest`; 8 parallel
+  Kotlin compilations run out of memory — compile worktrees sequentially (`~/work/cs-export-launch.sh`).
 
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
