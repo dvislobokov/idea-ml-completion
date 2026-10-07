@@ -640,6 +640,20 @@ No gain (slightly negative on the standard test): the default mix (50 % line-ali
 "no effect" correctly. Working rule from here: data/format hypotheses on the 8.6 M proxy (minutes), winners straight to the 50 M models; the
 31 M models are not retrained further (user decision 2026-10-07).
 
+**Go ranker re-exported and retrained (e17b).** The Go export now sees dependencies: the corpus snapshots had no `go.mod` (`fetch.sh` kept only
+`*.go`), so `tools/psi/prepare-mods.sh` fetches `go.mod`/`go.sum` from GitHub into an overlay and runs `go mod download` outside the IDE; per
+repository +20–31 % lists, recall 0.888 → 0.920, receiver type known at 92 % of `.`-positions (was 79 %), ~190 ms per position
+(`tools/psi/REPORT.md`). 150 rank + 100 test repositories, 5 positions per file, 8 direct JVMs, 60 min: 21 767 / 11 845 lists.
+
+| order of the list (11 845 test lists, 100 repos) | top-1 | top-5 | MRR |
+|---|---|---|---|
+| plugin rules | 0.380 | 0.662 | 0.513 |
+| n-gram e14-b only | 0.376 | 0.551 | 0.466 |
+| **e17b ranker (210 weights)** | **0.700** | **0.926** | **0.799** |
+
+Per context (MRR): after `.` 0.738, statement start 0.824, argument 0.855, type position 0.843, assignment rhs 0.792, other 0.782 — e17's
+0.808 reproduced with half the repositories. Model: `models/go-rank-e17b.cml` (also `idea-golang-support/ml-models/go/`); shards `data/go-psi/`.
+
 **C# ranker on real plugin lists (the e18 goal).** The .NET plugin agent built the headless export (`mlDataset`: the plugin's own completion at
 sampled positions, 19 language features in `CSharpMlFeatures` + 13 common, candidate names kept); on the server 16 workers in git worktrees
 (`-Pml.maxFiles=60 -Pml.maxCopy=400 -Pml.names=true`; CodeVision/daemon off and `--no-daemon` were needed, see the task file) exported
