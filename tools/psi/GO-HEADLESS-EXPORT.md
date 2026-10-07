@@ -57,12 +57,40 @@ workers are started as plain JVMs instead, with exactly the command line Gradle'
   `idea.log.path` per worker, adds `-Djava.awt.headless=true`, `-Xmx6g` (`ML_HEAP`), and runs
   `org.junit.runner.JUnitCore io.github.golangsupport.ml.<Class>` from `go-psi-ide/` (cwd of the Gradle worker).
 - `launch-dataset.sh <N> [perFile] [maxFiles]` splits `sets/rank.txt` and `sets/test.txt` into N parts and starts
-  `ml-export-w<i>` units; logs in `logs/`.
+  `ml-export-w<i>` units; logs in `logs/`. Scripts live in `/root/work/go-psi/` on the server (copies here); run `prepare-mods.sh` first.
 - Rule: no Gradle build of the plugin while workers run (it rewrites the sandbox jars and `build/instrumented/instrumentTestCode`).
   After a source change: one Gradle smoke run (`sets/smoke.txt`), then re-capture `test-classpath.txt` if the classpath changed.
 
 Trial (3 small repos, 50 files each, 10 positions/file): identical shards from Gradle and from `run-export.sh`; 19–29 ms per
 position, 24 s per JVM including start-up (~10 s), indexing of a small repository 1–3 s.
+
+## Module cache and reused IDE system directory (2026-10-07 evening, `REPORT.md`)
+
+The corpus snapshots hold only `*.go` + LICENSE/README (no `go.mod`/`go.sum`; `tools/corpus/fetch.sh` now keeps them for new
+downloads), so the plugin saw every external import as unresolved (`GoUnknownType`) in e17. The fix is outside the IDE:
+
+1. `prepare-mods.sh <repo-list> [jobs]` fetches the root `go.mod` + `go.sum` of every repository from GitHub (HEAD) into
+   `/root/work/go-psi/overlay/<repo>/` and runs `go mod download` there (`GOMODCACHE=/root/go/pkg/mod`, `GOFLAGS=-mod=mod`,
+   `GOTOOLCHAIN=local`; ~0.5 GB and 1–2 min for a 40-dependency repository, cached modules are free). Repositories without a root
+   `go.mod` are listed in `overlay/no-go-mod.txt` (they export as before, with unresolved imports).
+2. The exporter copies `overlay/<repo>/go.{mod,sum,work}` over the repository copy (`-Dml.overlay=<dir>`) and the worker JVM gets
+   `-Dgopsi.gomodcache=/root/go/pkg/mod` (`run-export.sh`, env `ML_GOMODCACHE`; the Gradle default on Linux is the Windows path
+   `$HOME\go\pkg\mod` — pass `-Pgopsi.gomodcache` when running through Gradle). The plugin resolves imports from the extracted
+   module directories through its own module graph (MVS over the `cache/download/**/@v/*.mod` files); nothing is copied or indexed.
+3. The IDE system directory (`idea.system.path`) is under `/root/work/go-psi/system/`: `ML_SYSTEM=fresh` (default, an empty directory
+   per start like Gradle's sandbox), `shared` (one directory reused between runs, one JVM at a time), `copy` (each worker starts from a
+   copy of the warmed `system/base`). Reuse pays only together with `-Dml.libraryRoots=stdlib|all` (GOROOT / module directories as
+   library roots, indexed as in the IDE): the warmed stub index is picked up (GOROOT 5.4 k files: 22 s cold, 7 s warm scan; all modules of
+   gatewayd 26 k files: 87 s cold, 25 s warm) — but completion recall and speed do not change with it, so the default stays `none`/`fresh`.
+4. Per position the exporter now replaces only the identifier in the document (incremental reparse) instead of `setText` of the whole
+   file twice; the shards are the same lists (−10–15 % per position).
+
+`measure.sh <name> <fresh|shared|copy> <gomodcache> [-Dml.*]` runs one measured configuration on `sets/one.txt` (unit `go-psi-<name>`,
+log `logs/<name>.log`, shards `out/<name>/`); `profile.sh` samples the stacks of the running worker. Summary line fields added by this
+round: `dot=<.-positions> dot-resolved=<receiver type or package known> (<share>) index-ms=<copy+refresh+index> wall-ms=<repository>`.
+
+Direct JVM runs need the instrumented test classes: after a source change run `:go-psi-ide:instrumentTestCode` (not just `testClasses` —
+the worker's classpath has `build/instrumented/instrumentTestCode`, and `testClasses` alone leaves stale classes there).
 
 ## Data layout (`/root/work/ml-data/go/psi/`)
 
@@ -79,6 +107,7 @@ position, 24 s per JVM including start-up (~10 s), indexing of a small repositor
   real-list shards by projecting the base features; prints rules / LM-only / ranker rows per context kind.
   `javac -cp ml-core.jar:kotlin-stdlib.jar -d classes EvalProxy.java; java -cp classes:... EvalProxy <rank.cml> <shards dir> <name>`.
 - `export_summary.py <logdir>... [--md out]` — totals of the dataset export logs (`export-summary.md`).
+- `REPORT.md` — module cache / shared system directory measurements (2026-10-07 evening).
 - `E17.md` — experiment e17 (CHANGELOG entry + README row); `context-stats.md` — PSI-context statistics; the final report was returned to the coordinator.
 
 ## Measured on 2026-10-07

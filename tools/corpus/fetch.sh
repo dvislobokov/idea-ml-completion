@@ -7,13 +7,14 @@
 # codeload.github.com, extracted to the same layout with the commit recorded in `.commit`. FETCH_MODE=tar forces the tarball.
 set -euo pipefail
 lang="$1"; shift
-case "$lang" in csharp) pat='*.cs';; go) pat='*.go';; *) echo "unknown lang" >&2; exit 1;; esac
+# module files travel with the sources (Go: go.mod/go.sum/go.work — the headless PSI export needs them to resolve imports)
+case "$lang" in csharp) pat='*.cs'; extra=();; go) pat='*.go'; extra=('*/go.mod' '*/go.sum' '*/go.work');; *) echo "unknown lang" >&2; exit 1;; esac
 root="$(cd "$(dirname "$0")/../.." && pwd)/../ml-data/$lang/repos"
 mkdir -p "$root"
 
 clone_git() {   # $1 repo, $2 dst
   git clone -q --depth 1 --filter=blob:none --no-checkout "https://github.com/$1.git" "$2" 2>/dev/null &&
-  git -C "$2" sparse-checkout set --no-cone "$pat" '/LICENSE*' '/NOTICE*' '/README*' >/dev/null 2>&1 &&
+  git -C "$2" sparse-checkout set --no-cone "$pat" '/LICENSE*' '/NOTICE*' '/README*' "${extra[@]/#\*/}" >/dev/null 2>&1 &&
   git -C "$2" checkout -q 2>/dev/null &&
   echo "$1 $(git -C "$2" rev-parse HEAD) $(find "$2" -name "$pat" | wc -l) files (git)" >&2
 }
@@ -24,7 +25,7 @@ clone_tar() {   # $1 repo, $2 dst
   local top; top="$(tar -tzf "$tgz" 2>/dev/null | head -1 | cut -d/ -f1)"
   [ -n "$top" ] || { rm -f "$tgz"; return 1; }
   mkdir -p "$2"
-  tar -xzf "$tgz" -C "$2" --strip-components=1 --wildcards "$pat" '*/LICENSE*' '*/NOTICE*' '*/README*' 2>/dev/null || true
+  tar -xzf "$tgz" -C "$2" --strip-components=1 --wildcards "$pat" '*/LICENSE*' '*/NOTICE*' '*/README*' "${extra[@]}" 2>/dev/null || true
   rm -f "$tgz"
   echo "${top##*-}" > "$2/.commit"      # codeload names the top directory <repo>-<sha>
   echo "$1 $(cat "$2/.commit") $(find "$2" -name "$pat" | wc -l) files (tar)" >&2
