@@ -8,7 +8,9 @@ namespace CmlRoslyn;
 public sealed class Verdict
 {
     public int Names;                 // simple names examined in the span
-    public int Unresolved;            // of which unresolved
+    public int Unresolved;            // of which unresolved even after the TypeIndex fallback (missing `using`)
+    public int UnresolvedStrict;      // unresolved by the semantic model alone
+    public int ViaIndex;              // resolved only through the TypeIndex (type / extension method exists, the `using` is missing)
     public int MemberAccesses;        // names that are the member part of `recv.Name`
     public int MemberRecvKnown;       // member accesses whose receiver type/namespace is known
     public string? FirstUnresolved;   // first unresolved name
@@ -25,7 +27,9 @@ public static class Judge
     static readonly HashSet<string> Special = new(StringComparer.Ordinal) { "var", "dynamic", "nameof", "global", "_", "value", "await", "async", "field", "args", "scoped", "notnull", "unmanaged" };
 
     /// <summary>Judge every <see cref="SimpleNameSyntax"/> whose span intersects [start, end).</summary>
-    public static Verdict JudgeSpan(SemanticModel model, SyntaxNode root, int start, int end, CancellationToken ct)
+    public static Verdict JudgeSpan(SemanticModel model, SyntaxNode root, int start, int end, CancellationToken ct) => JudgeSpan(model, root, start, end, null, ct);
+
+    public static Verdict JudgeSpan(SemanticModel model, SyntaxNode root, int start, int end, TypeIndex? index, CancellationToken ct)
     {
         var v = new Verdict();
         if (end <= start) return v;
@@ -62,6 +66,29 @@ public static class Judge
                 if (ti.Type != null && ti.Type.TypeKind != TypeKind.Error) resolved = true;
                 else if (name.Parent is AttributeSyntax) { var s = model.GetSymbolInfo(name.Parent, ct); resolved = s.Symbol != null || !s.CandidateSymbols.IsDefaultOrEmpty; }
                 else if (name.Parent is GotoStatementSyntax or LabeledStatementSyntax) resolved = true;
+            }
+            if (!resolved) v.UnresolvedStrict++;
+            if (!resolved && index != null)
+            {
+                // what the IDE would still see with the project's own global usings: a type / namespace / extension method of that name exists
+                var viaIndex = false;
+                if (!isMember)
+                {
+                    var arity = name is GenericNameSyntax g ? g.Arity : 0;
+                    var isAttr = name.Parent is AttributeSyntax;
+                    viaIndex = index.Lookup(text, arity).Length > 0 || (isAttr && index.Lookup(text + "Attribute", 0).Length > 0)
+                               || (name.Parent is QualifiedNameSyntax or MemberAccessExpressionSyntax && index.IsNamespaceSegment(text));
+                }
+                else
+                {
+                    if (!recvKnown)
+                    {
+                        var fb = FallbackReceiver(model, name, receiver, index, ct);
+                        if (fb != null) { recvKnown = true; v.MemberRecvKnown++; recvType = fb.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat); candidates = CountMembers(fb); viaIndex = MemberNames(fb).Contains(text) || fb is INamespaceSymbol nsf && nsf.GetMembers(text).Any(); }
+                    }
+                    if (!viaIndex && name.Parent?.Parent is InvocationExpressionSyntax or ConditionalAccessExpressionSyntax && index.HasExtensionMethod(text)) viaIndex = true;
+                }
+                if (viaIndex) { resolved = true; v.ViaIndex++; }
             }
             if (isMember) v.Trace.Add((text, recvType, resolved));
             if (!resolved)
@@ -108,6 +135,43 @@ public static class Judge
             IPropertySymbol pr when pr.Type.TypeKind != TypeKind.Error => pr.Type,
             _ => null,
         };
+    }
+
+    /// <summary>Receiver type when the semantic model has only an error type for the receiver: the candidates of an ambiguous
+    /// type, or the type of that simple name looked up in the index (missing `using`), or the declared (unbound) type of a
+    /// local / parameter / field / property looked up by its name and arity.</summary>
+    static INamespaceOrTypeSymbol? FallbackReceiver(SemanticModel model, SimpleNameSyntax name, ExpressionSyntax? receiver, TypeIndex index, CancellationToken ct)
+    {
+        if (receiver == null)
+        {
+            var cond = name.Parent?.Parent;
+            while (cond != null && cond is not ConditionalAccessExpressionSyntax) cond = cond.Parent;
+            if (cond is ConditionalAccessExpressionSyntax cae) receiver = cae.Expression; else return null;
+        }
+        ITypeSymbol? errType = model.GetTypeInfo(receiver, ct).Type;
+        var si = model.GetSymbolInfo(receiver, ct);
+        var sym = si.Symbol ?? (si.CandidateSymbols.IsDefaultOrEmpty ? null : si.CandidateSymbols[0]);
+        switch (sym)
+        {
+            case ILocalSymbol l: errType = l.Type; break;
+            case IParameterSymbol p: errType = p.Type; break;
+            case IFieldSymbol f: errType = f.Type; break;
+            case IPropertySymbol pr: errType = pr.Type; break;
+            case IMethodSymbol m: errType = m.ReturnType; break;
+            case INamespaceOrTypeSymbol nt when nt is not ITypeSymbol { TypeKind: TypeKind.Error }: return nt;
+        }
+        if (errType is IErrorTypeSymbol et)
+        {
+            if (!et.CandidateSymbols.IsDefaultOrEmpty && et.CandidateSymbols[0] is INamespaceOrTypeSymbol c) return c;
+            if (et.Name.Length > 0) { var found = index.Lookup(et.Name, et.Arity); if (found.Length > 0) return found[0]; }
+        }
+        else if (errType != null && errType.TypeKind != TypeKind.Error) return errType;
+        if (sym == null && receiver is SimpleNameSyntax rs)
+        {
+            var found = index.Lookup(rs.Identifier.ValueText, rs is GenericNameSyntax g ? g.Arity : 0);
+            if (found.Length > 0) return found[0];
+        }
+        return null;
     }
 
     /// <summary>Distinct member names visible on a type (including base types and interfaces for interfaces) or namespace.</summary>

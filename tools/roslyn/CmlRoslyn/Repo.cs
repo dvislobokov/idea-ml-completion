@@ -19,6 +19,8 @@ public sealed class Repo
     public CSharpCompilation Compilation { get; }
     public Dictionary<string, SyntaxTree> Trees { get; }   // relative path (forward slashes) → tree
     public int FileCount => Trees.Count;
+    TypeIndex? index;
+    public TypeIndex Index => index ??= new TypeIndex(Compilation);
     public double LoadSeconds { get; }
     public bool Truncated { get; }
 

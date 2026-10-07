@@ -28,6 +28,7 @@ public static class SelfTest
         class C<TItem> where TItem : Other
         {
             Other fld = new();
+            StringBuilder sb = new();
             Other Prop { get; set; } = new();
             static Other Stat = new();
             void M(Other param, int n, TItem item, IEnumerable<Other> seq)
@@ -53,6 +54,11 @@ public static class SelfTest
                 _ = local.Nope;                        // expect: Other
                 _ = nope.Name;                         // expect: ?
                 _ = DateTime.Now.Year;                 // expect: DateTime, DateTime
+                _ = CultureInfo.InvariantCulture;      // expect: CultureInfo   (missing `using System.Globalization` → TypeIndex)
+                _ = sb.Append(' ');                    // expect: StringBuilder  (field of an unbound type, TypeIndex)
+                Assert2.That(n, Is.EqualTo(1));        // expect: ?, Is          (Assert2 exists nowhere; NUnit `Is` via TypeIndex)
+                _ = local.Items.Should();              // expect: Other, List<int>  (FluentAssertions extension, missing using)
+                _ = local.Nope2();                     // expect: Other          (no such extension anywhere)
             }
         }
         """;
@@ -63,6 +69,7 @@ public static class SelfTest
         var tree = CSharpSyntaxTree.ParseText(Source, Repo.ParseOptions, path: "selftest.cs");
         var comp = CSharpCompilation.Create("selftest", new[] { tree }, refs, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         var model = comp.GetSemanticModel(tree);
+        var index = new TypeIndex(comp);
         var text = tree.GetText();
         int fail = 0, total = 0;
         foreach (var line in text.Lines)
@@ -71,13 +78,14 @@ public static class SelfTest
             var i = s.IndexOf("// expect:", StringComparison.Ordinal);
             if (i < 0) continue;
             total++;
-            var expected = s[(i + 10)..].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-            var v = Judge.JudgeSpan(model, tree.GetRoot(), line.Start, line.Start + i, CancellationToken.None);
+            var exp = s[(i + 10)..]; var j = exp.IndexOf("  ("); if (j >= 0) exp = exp[..j];
+            var expected = exp.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            var v = Judge.JudgeSpan(model, tree.GetRoot(), line.Start, line.Start + i, index, CancellationToken.None);
             var got = v.Trace.Select(t => t.recv ?? "?").ToArray();
             var ok = got.SequenceEqual(expected);
             if (!ok) fail++;
             Console.WriteLine($"{(ok ? "ok  " : "FAIL")} {s[..i].Trim(),-45} expected [{string.Join(", ", expected)}] got [{string.Join(", ", got)}]" +
-                              (v.Unresolved > 0 ? $" unresolved: {v.FirstUnresolved}" : ""));
+                              (v.Unresolved > 0 ? $" unresolved: {v.FirstUnresolved}" : "") + (v.ViaIndex > 0 ? $" via-index: {v.ViaIndex}" : ""));
         }
         Console.WriteLine($"selftest: {total - fail}/{total} lines ok");
         return fail == 0 ? 0 : 1;

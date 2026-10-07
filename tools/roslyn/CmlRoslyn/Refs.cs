@@ -16,7 +16,9 @@ public static class Refs
         void Add(string path)
         {
             var name = Path.GetFileName(path);
-            if (!name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) return;
+            if (!name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) && !name.EndsWith(".winmd", StringComparison.OrdinalIgnoreCase)) return;
+            // Krafs.Rimworld.Ref ships Unity's monolithic UnityEngine*.dll: UnityEngine.Modules (per-module assemblies) is the one to use
+            if (path.Contains("krafs.rimworld.ref", StringComparison.OrdinalIgnoreCase) && name.StartsWith("UnityEngine", StringComparison.OrdinalIgnoreCase)) return;
             if (name.Contains("Microsoft.VisualBasic", StringComparison.OrdinalIgnoreCase)) return;
             if (seen.Add(name)) files.Add(path);
         }
@@ -59,7 +61,7 @@ public static class Refs
                 var idVer = pkg.Name.Split('/');
                 foreach (var asm in compile.EnumerateObject())
                 {
-                    if (!asm.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!asm.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) && !asm.Name.EndsWith(".winmd", StringComparison.OrdinalIgnoreCase)) continue;
                     foreach (var folder in folders)
                     {
                         var path = Path.Combine(folder, idVer[0].ToLowerInvariant(), idVer[1].ToLowerInvariant(), asm.Name.Replace('/', Path.DirectorySeparatorChar));
@@ -67,6 +69,14 @@ public static class Refs
                     }
                 }
             }
+        }
+        // platform reference packs that have no TFM compatible with the synthetic project: PackageDownload-ed, globbed here
+        foreach (var pack in new[] { "microsoft.android.ref.35", "microsoft.ios.ref" })
+        {
+            var dir = Path.Combine(nuget, pack);
+            if (!Directory.Exists(dir)) continue;
+            var ver = Directory.GetDirectories(dir).OrderByDescending(x => x, StringComparer.Ordinal).First();
+            foreach (var tfm in Directory.GetDirectories(Path.Combine(ver, "ref"))) AddDir(tfm);
         }
         if (extraDirs != null)
             foreach (var d in extraDirs.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) AddDir(d);

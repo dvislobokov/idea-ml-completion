@@ -10,6 +10,7 @@ namespace CmlRoslyn;
 
 public static class Program
 {
+    public static bool UseIndex = true;
     static readonly JsonSerializerOptions JsonOpts = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     public static int Main(string[] args)
@@ -40,7 +41,7 @@ public static class Program
         Console.Error.WriteLine("""
             CmlRoslyn — Roslyn-based filter / context tool for the ML completion engine (see README.md)
               filter  --positions <eval.json> --repos <root> --out <jsonl> [--mode spm] [--context] [--threads 4]
-                      [--repo-timeout 900] [--max-files 8000] [--max-repos N] [--ctx-chars 1200] [--ctx-members 40] [--no-implicit-usings]
+                      [--repo-timeout 900] [--max-files 8000] [--max-repos N] [--ctx-chars 1200] [--ctx-members 40] [--no-implicit-usings] [--no-index]
               context --manifest <manifest.jsonl> --repos <root> --out <dir> [--fold test] [--max-repos N] [--max-files-per-repo N]
                       [--threads 4] [--repo-timeout 900] [--ctx-chars 1200] [--ctx-members 40]
               usings  --positions <eval.json> | --manifest <manifest.jsonl> [--fold test] [--repos-list <file>] --repos <root> --out <tsv>
@@ -121,6 +122,7 @@ public static class Program
         Console.Error.WriteLine($"{positions.Count} positions, {positions.Select(p => p.Repo).Distinct().Count()} repos, mode {mode}");
         var refs = LoadRefs(o);
         Repo.UseImplicitUsings = !o.ContainsKey("no-implicit-usings");
+        UseIndex = !o.ContainsKey("no-index");
 
         var byRepo = positions.GroupBy(p => p.Repo).OrderByDescending(g => g.Count()).Take(maxRepos).ToList();
         var t0 = Stopwatch.StartNew();
@@ -204,14 +206,15 @@ public static class Program
 
         // the true line, in the original compilation
         if (!models.TryGetValue(tree, out var model)) models[tree] = model = repo.Compilation.GetSemanticModel(tree);
-        var vt = Judge.JudgeSpan(model, tree.GetRoot(ct), abs, abs + p.True.Length, ct);
+        var index = Program.UseIndex ? repo.Index : null;
+        var vt = Judge.JudgeSpan(model, tree.GetRoot(ct), abs, abs + p.True.Length, index, ct);
         Put(p.Out, "true", vt);
 
         // the generated line spliced in place of the true rest
         var genTree = tree.WithChangedText(text.WithChanges(new TextChange(new TextSpan(abs, p.True.Length), p.Gen)));
         var genComp = repo.Compilation.ReplaceSyntaxTree(tree, genTree);
         var genModel = genComp.GetSemanticModel(genTree);
-        var vg = Judge.JudgeSpan(genModel, genTree.GetRoot(ct), abs, abs + p.Gen.Length, ct);
+        var vg = Judge.JudgeSpan(genModel, genTree.GetRoot(ct), abs, abs + p.Gen.Length, index, ct);
         Put(p.Out, "gen", vg);
         p.Out["judge_ms"] = (int)sw.Elapsed.TotalMilliseconds;
 
@@ -246,7 +249,7 @@ public static class Program
 
     static void Put(Dictionary<string, object?> o, string k, Verdict v)
     {
-        o[k + "_resolvable"] = v.Resolvable; o[k + "_names"] = v.Names; o[k + "_unresolved"] = v.Unresolved;
+        o[k + "_resolvable"] = v.Resolvable; o[k + "_resolvable_strict"] = v.UnresolvedStrict == 0; o[k + "_via_index"] = v.ViaIndex; o[k + "_names"] = v.Names; o[k + "_unresolved"] = v.Unresolved;
         o[k + "_members"] = v.MemberAccesses; o[k + "_members_recv_known"] = v.MemberRecvKnown;
         o[k + "_first_unresolved"] = v.FirstUnresolved; o[k + "_first_is_member"] = v.FirstIsMember;
         o[k + "_recv_known"] = v.FirstRecvKnown; o[k + "_recv_type"] = v.FirstRecvType; o[k + "_candidates"] = v.FirstCandidates;
