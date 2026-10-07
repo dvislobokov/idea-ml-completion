@@ -52,6 +52,8 @@ def parse():
     ap.add_argument("--spm-rate", type=float, default=0.5)
     ap.add_argument("--line-rate", type=float, default=0.5, help="share of FIM documents with a line-aligned middle (ends at a line end)")
     ap.add_argument("--single-line", type=float, default=0.5, help="probability that a line-aligned middle spans exactly one line")
+    ap.add_argument("--teacher", help="npz of teacher lines (tools/nn/distill/distill.py encode) for sequence-level distillation")
+    ap.add_argument("--teacher-rate", type=float, default=0.5, help="share of FIM documents of a file with teacher samples that use one")
     ap.add_argument("--t-min", type=float, default=2e6, help="repo down-weighting knee in tokens (0 = off)")
     ap.add_argument("--no-path", action="store_true", help="do not prepend the file path after <|file_sep|>")
     ap.add_argument("--max-file-tokens", type=int, default=0, help="skip files longer than this (0 = keep all)")
@@ -158,7 +160,7 @@ def main():
     if ddp and not main_proc:
         dist.barrier()          # rank 0 builds the path-token cache (<fold>.pathtok.u16) first; the others reuse it
     stream = D.PackedStream(train_sh, tok, seq_len=a.seq_len, seed=a.seed, fim_rate=a.fim_rate, spm_rate=a.spm_rate,
-                            line_rate=a.line_rate, single_line=a.single_line,
+                            line_rate=a.line_rate, single_line=a.single_line, teacher=a.teacher, teacher_rate=a.teacher_rate,
                             t_min=a.t_min, with_path=not a.no_path, max_file_tokens=a.max_file_tokens,
                             io_threads=a.io_threads, rank=RANK, world_size=WORLD, name=f"train/{RANK}" if ddp else "train")
     if ck:

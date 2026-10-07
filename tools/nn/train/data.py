@@ -280,8 +280,18 @@ class PackedStream:
 
     def __init__(self, sh: Shards, tok: Tokenizer, seq_len=2048, seed=1, fim_rate=0.5, spm_rate=0.5, line_rate=0.5,
                  t_min=2_000_000, group_tokens=None, with_path=True, max_file_tokens=0, epoch=0, name="train",
-                 io_threads=4, lookahead=128, rank=0, world_size=1, single_line=0.5):
+                 io_threads=4, lookahead=128, rank=0, world_size=1, single_line=0.5, teacher=None, teacher_rate=0.5):
         self.sh, self.tok, self.seq_len, self.seed = sh, tok, seq_len, seed
+        # Sequence-level distillation (tools/nn/distill): teacher = npz with per-sample (fi, a, b, token ids); a FIM document of
+        # a file that has samples uses one of them with probability teacher_rate: prefix = body[:a], middle = the teacher's line,
+        # suffix = body[b:] (the author's line is dropped, so the student never sees two answers for one position).
+        self.teacher, self.teacher_rate = None, teacher_rate
+        if teacher:
+            z = np.load(teacher)
+            by = {}
+            for k, f in enumerate(z["fi"].tolist()):
+                by.setdefault(f, []).append(k)
+            self.teacher = {"fi": by, "a": z["a"], "b": z["b"], "off": z["off"], "ids": z["ids"]}
         self.rank, self.world_size = rank, world_size   # DDP: rank r consumes groups r, r+W, r+2W, ... of every epoch
         self.single_line = single_line   # probability that a line-aligned middle spans exactly one line (inference: the rest of a line)
         self.fim_rate, self.spm_rate, self.line_rate, self.t_min = fim_rate, spm_rate, line_rate, t_min
@@ -378,8 +388,15 @@ class PackedStream:
             fim = rng.random() < self.fim_rate
         if not fim or len(body) < 2:
             return np.concatenate([hdr, body, _sp(T.eot)])
-        a, b = self.fim_cuts(body, rng)
-        mid = body[a:b]
+        t = self.teacher
+        if t is not None and i in t["fi"] and rng.random() < self.teacher_rate:
+            k = t["fi"][i][int(rng.integers(0, len(t["fi"][i])))]
+            a, b = int(t["a"][k]), int(t["b"][k])
+            mid = t["ids"][t["off"][k]:t["off"][k + 1]].astype(_U16)
+            self.stats["teacher_docs"] = self.stats.get("teacher_docs", 0) + 1
+        else:
+            a, b = self.fim_cuts(body, rng)
+            mid = body[a:b]
         suf = body[b:b + MAX_SUF]
         pre_max = self.seq_len - DOC_MARGIN - 4 - len(hdr) - len(suf) - len(mid)
         pre = body[max(0, a - pre_max):a]
