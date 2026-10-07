@@ -623,7 +623,16 @@ state (resume only with the same world size), loss all-reduced for logging, eval
 13 065 steps in 49 min on both GPUs): eval ppl 2.99 plain / 3.30 FIM (int8 export 2.988 → 2.989). Standard whole-line evaluation (3 000 positions,
 2 560 files, SPM, healing): rest of line exact **63.6 %** (plain 60.0 %), ≤ 8 tokens 74.8 %, first token 0.881; prod ≥ 0.8 shown 36.1 % with
 97.0 % exact lines, ≥ 0.9: 26.7 % / 98.1 %. go31m-e1 (e16, unscrubbed corpus, broken PSM, other vocabulary and test fold) had 61.7 % / 73.3 % / 0.88:
-not worse, slightly better, and publishable — `models/go-nn-31m-e2.cml`. Fresh-repository numbers and the teachers on Go follow.
+not worse, slightly better, and publishable — `models/go-nn-31m-e2.cml`.
+
+| fresh Go positions (2 000, repos created ≥ 2026-05-01) | rest of line exact | ≤ 8 | first token | rest 1–3 / 4–8 / 9+ | only teacher / only ours |
+|---|---|---|---|---|---|
+| go31m-e2 (ours) | 56.6 % | 69.6 % | 0.860 | 83.9 / 51.7 / 24.2 % | — |
+| Qwen2.5-Coder-1.5B | 63.9 % | 74.7 % | 0.871 | 84.7 / 62.2 / 36.8 % | 248 / 103 |
+| Qwen2.5-Coder-7B | 70.6 % | 80.7 % | 0.901 | 87.4 / 72.2 / 45.4 % | 357 / 78 |
+
+On Go the gap to the 7B teacher is 14 p.p. (C#: 23), on short rests (1–3 tokens) 3.5 p.p.; our model shows 33 % of positions at
+prod ≥ 0.8 with 97 % exact lines — the same share the 7B shows at its 0.7 gate with 94 %.
 
 Smoke on the C# shards (6 min + 3 min resume): resume continues exactly (step 399 → 591, loss continuous); throughput while both GPUs were shared with the
 teacher evaluations 1.3 M tok/s; clean measurement on idle GPUs **2.45 M tok/s** (1.96× one GPU at 1.25 M; 428 ms per 1 M-token step), so a
