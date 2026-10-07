@@ -144,6 +144,22 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
   exports + evaluates itself (`*-queue.out`). Project bigram cache: measured, useless (CHANGELOG). Next levers: structured context in the prompt,
   PSI filter after `.`, distillation from Qwen2.5-Coder-7B; go50m 2 epochs / line-FIM after the C# results.
 
+## 2026-10-08 night (МСК = UTC+3; report times to the user in МСК)
+- Rankers on real lists are DONE and published: Go `models/go-rank-e17b.cml` (MRR 0.799 vs rules 0.513; 150+100 repos, dependencies via
+  `tools/psi/prepare-mods.sh` overlay + GOMODCACHE — the corpus has no go.mod) and C# `models/cs-rank-e18.cml` (0.711 vs 0.526; 127 repos,
+  export stopped by the user). Same files in the plugins' `ml-models/`; shards in `data/{go,csharp}-psi/`. Plugin side next: weighers.
+- 31 M models are frozen (user decision); hypotheses go to the 8.6 M proxy (`go5m`, `tools/server/proxy-run.sh`, gpu `0,1` = DDP), winners to
+  50 M. Measured negatives: line-FIM, 2 epochs, project bigram cache, PSI resolve filter (tools/roslyn/REPORT.md: 1 of 46), context block (2 %).
+- Distillation (tools/nn/distill): C# 1.5B teacher lines generated (data/csharp-distill, 246 k) but the C# proxy comparison never completed
+  (the first run was killed by my own edit of a running script; then the user stopped all C# jobs). Go track running: 7B teacher on 300 k Go
+  positions (units distill-go7b-0/1, ~04:15 МСК) → `distill-go-proxy` encodes and trains `go5m-teacher` vs `go5m-base` (running on GPU 0).
+  If the proxy gains ≥ 1 p.p.: go50m with `--teacher`. vLLM lives in `~/work/nn/.venv-vllm` (needs CUDA_HOME=<venv>/nvidia/cu13, ninja,
+  VLLM_ATTENTION_BACKEND=FLASH_ATTN, VLLM_USE_FLASHINFER_SAMPLER=0); the training venv keeps torch 2.14.1.
+- .NET export speed-up by the (stopped) C# agent is on master as 41ca187 (restore + assembly index, type snapshot, debug log off: ×7).
+- Deck: docs/talk/slides.md (82 slides, Marp, charts from real numbers), HTML built; PDF needs a browser on another machine.
+- Never edit a script while a unit runs it (bash reads incrementally — it killed the C# proxy run). Backup archive for the user:
+  ~/work/backup/ckpts-evals-2026-10-07.tar (1.9 GB).
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher
