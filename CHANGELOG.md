@@ -477,3 +477,14 @@ n-gram's arity failure (opens with `)` after the last argument in 65 % of such p
 closers (`);`, `)]`, `}`) — the plugin should not show one-token closers. Interpolated strings and `_logger.Log…` messages are rarely byte-exact.
 PSM is still far behind SPM (line exact 20.7 % vs 39.8 %) even with correct data: teacher-forced NLL of the first middle token is 2.12 (PSM)
 vs 0.81 (SPM) — a capacity/format effect of a 31 M model, so inference uses SPM. Model: `csharp/models/cs-nn-31m-e1.cml` (31.2 MB).
+
+**Token healing and show policy (2026-10-07, `NnCompletion`).** The eval protocol (and a live caret) often sits inside a BPE pre-token
+(`foo(⟨⟩)`, `"x"⟨⟩)`, after a typed space, mid-identifier) — 10–11 % of positions, where the model got 1.5–4.8 % of lines right because
+`()`, `");` etc. are single pre-tokens never split in training. Healing (cut the prompt back to the last pre-token boundary, constrain the
+first generated tokens to start with the typed remainder, strip it from the output) lifts those positions to 67 % (Go) / 75 % (C#):
+rest of line exact all positions Go 55.7 → **61.7 %**, C# 39.8 → **47.9 %**; ≤ 8 tokens Go 65.8 → 73.3 %, C# 49.0 → 60.2 %; first token
+Go 0.80 → 0.88, C# 0.72 → 0.81. `--heal none` reproduces the old numbers exactly. Show policy measured: gate on the product of token
+probabilities; a repetition guard removes 2.5–2.8 % of lines, all wrong (C# precision at ≥0.8: 94.5 → 96.6 %); punctuation-only closers
+(`);`, `}`) are 22–25 % of positions and 98 % right at ≥0.8 — showing them is a UX choice. Kotlin: `BpeTokenizer.lastPreTokenBoundary`,
+`VocabPrefixIndex`, `NnCompletion.complete(path, before, after)` → text, conf_prod/conf_min, show decision; parity with Python on 99/99
+healed records (scalar, native f32) and on the C# model (`models/parity-cs`, argmax 32/32, 40/40 lines). API: `docs/NN-COMPLETION-API.md`.
