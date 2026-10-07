@@ -280,9 +280,10 @@ class PackedStream:
 
     def __init__(self, sh: Shards, tok: Tokenizer, seq_len=2048, seed=1, fim_rate=0.5, spm_rate=0.5, line_rate=0.5,
                  t_min=2_000_000, group_tokens=None, with_path=True, max_file_tokens=0, epoch=0, name="train",
-                 io_threads=4, lookahead=128, rank=0, world_size=1):
+                 io_threads=4, lookahead=128, rank=0, world_size=1, single_line=0.5):
         self.sh, self.tok, self.seq_len, self.seed = sh, tok, seq_len, seed
         self.rank, self.world_size = rank, world_size   # DDP: rank r consumes groups r, r+W, r+2W, ... of every epoch
+        self.single_line = single_line   # probability that a line-aligned middle spans exactly one line (inference: the rest of a line)
         self.fim_rate, self.spm_rate, self.line_rate, self.t_min = fim_rate, spm_rate, line_rate, t_min
         self.group_tokens = group_tokens or 2 * seq_len
         self.with_path = with_path
@@ -348,7 +349,7 @@ class PackedStream:
         nl = np.nonzero(self.tok.nl_start[body])[0] if rng.random() < self.line_rate else None
         if nl is not None and len(nl) > 0:
             ends = np.append(nl, n)                      # line-end cut points (before the newline token / EOF)
-            k = 1 if rng.random() < 0.5 else min(8, 1 + int(rng.geometric(0.35)))
+            k = 1 if rng.random() < self.single_line else min(8, 1 + int(rng.geometric(0.35)))
             j = int(rng.integers(0, len(ends)))
             b = int(ends[j])
             a0 = 0 if j - k < 0 else self._line_start_after(body, int(nl[j - k]))
