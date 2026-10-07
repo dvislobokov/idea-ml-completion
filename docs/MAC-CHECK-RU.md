@@ -51,7 +51,9 @@ java -cp "$(cat /tmp/cp.txt)" io.github.completionml.core.nn.NnBench --file mode
 
 Шаг 1: `native: loaded libcmlkernels-macos-arm64.dylib, ISA neon-dotprod (detected neon-dotprod)` — Gatekeeper не вмешался,
 NEON+DotProd прошли самопроверку. Шаг 3, 4 потока, реальная модель cs31m, строка целиком / при наборе: скалярный Kotlin 252 / 40 мс,
-native f32 164 / 49 мс, native q8 68 / 17 мс (`--kernels best` выбирает q8 сам). Шаг 2 (паритет) — ожидается.
+native f32 164 / 49 мс, native q8 68 / 17 мс (`--kernels best` выбирает q8 сам). Шаг 2 (паритет, 139 с): скалярный Kotlin и native f32 — argmax 32/32, жадные продолжения 32/32, rmse логпроб 0,0000
+(бит-в-бит с PyTorch на int8-весах); native q8 — argmax 30/32, продолжения 26/32, та же строка на 39/40 позициях, точность
+по истине одинаковая у всех путей (42,5 %) — та же картина, что у AVX-512 VNNI на сервере. NEON-путь проверен полностью.
 
 ## Что прислать
 

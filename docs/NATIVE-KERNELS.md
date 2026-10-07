@@ -166,6 +166,9 @@ copies and the Kotlin glue (profile with `-Dcompletionml.nn.profile=true`, see t
   native q8 (`sdot`) 55 / 0.75 / 68 / 17 — ×3.7 on a cold line, ×2.4 while typing; `NnKernels.best()` picks q8 by itself.
   The NEON f32 path decodes slower than scalar Kotlin (2.28 vs 1.71 ms/token): not the default, but worth a look if f32 is ever needed.
   Scalar Kotlin on the M1 Pro is on par with the EPYC server at 4 threads.
+  `NnParityTest` on the same Mac: scalar and native f32 reproduce the PyTorch int8 reference bit-for-bit (argmax 32/32,
+  greedy 32/32, logprob rmse 0); native q8 argmax 30/32, same line on 39/40 positions, identical line accuracy vs truth —
+  the usual W8A8 noise, same as VNNI on x86.
 - **AVX-VNNI (VEX) level** untested (no Alder Lake/Zen 5 here); guarded by the self-test.
 
 ## Known gaps / next steps if we ship
