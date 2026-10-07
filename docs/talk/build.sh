@@ -23,8 +23,11 @@ if [ -z "$BROWSER" ] && [ "${INSTALL_CHROME:-0}" = "1" ]; then
   BROWSER="$(find "$HOME/.cache/puppeteer" -type f -name chrome -perm -u+x 2>/dev/null | head -1 || true)"
 fi
 if [ -n "$BROWSER" ]; then
-  CHROME_PATH="$BROWSER" $MARP slides.md -o slides.pdf --pdf --allow-local-files --html
-  echo "built slides.html and slides.pdf (browser: $BROWSER)"
+  if CHROME_PATH="$BROWSER" $MARP slides.md -o slides.pdf --pdf --allow-local-files --html; then
+    echo "built slides.html and slides.pdf (browser: $BROWSER)"
+  else
+    echo "built slides.html; PDF export failed (the browser at $BROWSER could not start — on a bare server it needs libatk/libnss/libgbm etc.)"
+  fi
 else
   echo "built slides.html; no Chromium found — PDF skipped (INSTALL_CHROME=1 ./build.sh downloads one)"
 fi
