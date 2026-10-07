@@ -17,6 +17,7 @@ public sealed class Verdict
     public string? FirstRecvType;     // display of the receiver type
     public int FirstCandidates;       // number of distinct member names on the receiver (0 when unknown)
     public bool Resolvable => Unresolved == 0;
+    public List<(string name, string? recv, bool resolved)> Trace = new();   // every member access in the span: name, receiver type display (null = unknown), resolved?
 }
 
 public static class Judge
@@ -62,6 +63,7 @@ public static class Judge
                 else if (name.Parent is AttributeSyntax) { var s = model.GetSymbolInfo(name.Parent, ct); resolved = s.Symbol != null || !s.CandidateSymbols.IsDefaultOrEmpty; }
                 else if (name.Parent is GotoStatementSyntax or LabeledStatementSyntax) resolved = true;
             }
+            if (isMember) v.Trace.Add((text, recvType, resolved));
             if (!resolved)
             {
                 v.Unresolved++;

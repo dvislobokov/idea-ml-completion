@@ -27,6 +27,8 @@ public static class Program
             {
                 "filter" => Filter(opts),
                 "context" => Context(opts),
+                "usings" => Usings(opts),
+                "selftest" => SelfTest.Run(opts),
                 _ => Usage(),
             };
         }
@@ -41,7 +43,11 @@ public static class Program
                       [--repo-timeout 900] [--max-files 8000] [--max-repos N] [--ctx-chars 1200] [--ctx-members 40] [--no-implicit-usings]
               context --manifest <manifest.jsonl> --repos <root> --out <dir> [--fold test] [--max-repos N] [--max-files-per-repo N]
                       [--threads 4] [--repo-timeout 900] [--ctx-chars 1200] [--ctx-members 40]
-              common: --assets <project.assets.json> (default: ../refpacks/obj/project.assets.json next to the binary)
+              usings  --positions <eval.json> | --manifest <manifest.jsonl> [--fold test] [--repos-list <file>] --repos <root> --out <tsv>
+                      [--threads 4]   unresolved `using` namespaces across the repositories (what to add to refpacks)
+              selftest                receiver-type detection on a synthetic file
+              common: --assets <project.assets.json> (default: refpacks/obj/project.assets.json found by walking up from the binary / cwd;
+                      fails when missing unless --allow-no-assets)
                       --dotnet-root <dir> --extra-refs <dir;dir>
             """);
         return 2;
@@ -50,17 +56,28 @@ public static class Program
     static string Opt(Dictionary<string, string> o, string k, string d) => o.TryGetValue(k, out var v) ? v : d;
     static int OptInt(Dictionary<string, string> o, string k, int d) => o.TryGetValue(k, out var v) ? int.Parse(v) : d;
 
-    static List<MetadataReference> LoadRefs(Dictionary<string, string> o)
+    internal static List<MetadataReference> LoadRefs(Dictionary<string, string> o)
     {
-        var assets = Opt(o, "assets", "");
+        var assets = Opt(o, "assets", Environment.GetEnvironmentVariable("CMLROSLYN_ASSETS") ?? "");
         if (assets == "")
         {
-            var here = AppContext.BaseDirectory;
-            foreach (var up in new[] { "../../../../refpacks/obj/project.assets.json", "../refpacks/obj/project.assets.json", "refpacks/obj/project.assets.json" })
+            // walk up from the binary (bin/Release/net10.0 → CmlRoslyn → tools/roslyn) and from the cwd looking for refpacks/obj/project.assets.json
+            foreach (var start in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
             {
-                var c = Path.GetFullPath(Path.Combine(here, up));
-                if (File.Exists(c)) { assets = c; break; }
+                var dir = Path.GetFullPath(start);
+                for (var i = 0; i < 6 && dir != null && assets == ""; i++, dir = Path.GetDirectoryName(dir))
+                    foreach (var rel in new[] { "refpacks/obj/project.assets.json", "roslyn/refpacks/obj/project.assets.json", "tools/roslyn/refpacks/obj/project.assets.json" })
+                    {
+                        var c = Path.Combine(dir, rel);
+                        if (File.Exists(c)) { assets = c; break; }
+                    }
+                if (assets != "") break;
             }
+        }
+        if (assets == "" || !File.Exists(assets))
+        {
+            if (o.ContainsKey("allow-no-assets")) Console.Error.WriteLine("refs: WARNING no project.assets.json — only the SDK ref packs are referenced, NuGet types will not resolve");
+            else throw new InvalidOperationException("refpacks/obj/project.assets.json not found: run `dotnet restore` in tools/roslyn/refpacks or pass --assets <file> (or --allow-no-assets)");
         }
         Console.Error.WriteLine($"refs: assets = {(assets == "" ? "(none)" : assets)}");
         return Refs.Load(o.TryGetValue("dotnet-root", out var dr) ? dr : null, assets == "" ? null : assets, o.TryGetValue("extra-refs", out var er) ? er : null, Console.Error);
@@ -386,6 +403,88 @@ public static class Program
         if (stats.Count > 0)
             Console.WriteLine($"files: {stats.Count}; context mean {stats.Average(s => s.chars):F0} chars, {stats.Average(s => s.lines):F1} lines ({stats.Average(s => s.sigs):F1} signatures + " +
                               $"{stats.Average(s => s.members):F1} member lists); empty {100.0 * stats.Count(s => s.chars == 0) / stats.Count:F1} %; mean {stats.Average(s => s.ms):F0} ms per file (excl. load)");
+        return 0;
+    }
+    // ------------------------------------------------------------------------------------------------ usings
+
+    /// <summary>Which `using X.Y.Z;` directives do not bind, per repository: the data for extending refpacks/RefPacks.csproj.</summary>
+    static int Usings(Dictionary<string, string> o)
+    {
+        var reposRoot = o["repos"]; var outPath = o["out"];
+        var threads = OptInt(o, "threads", 4);
+        var repoTimeout = OptInt(o, "repo-timeout", 900);
+        var maxFiles = OptInt(o, "max-files", 8000);
+        var maxRepos = OptInt(o, "max-repos", int.MaxValue);
+        var repos = new SortedSet<string>(StringComparer.Ordinal);
+        if (o.TryGetValue("positions", out var positionsPath))
+        {
+            var rawJson = Regex.Replace(File.ReadAllText(positionsPath), @"(?<=[:,\[\s])-?(NaN|Infinity)(?=[,\]\}\s])", "null");
+            foreach (var n in JsonNode.Parse(rawJson)!["modes"]![Opt(o, "mode", "spm")]!["positions"]!.AsArray()) repos.Add(n!["repo"]!.GetValue<string>());
+        }
+        if (o.TryGetValue("manifest", out var manifest))
+        {
+            var fold = Opt(o, "fold", "test");
+            foreach (var line in File.ReadLines(manifest))
+            {
+                var n = JsonNode.Parse(line)!;
+                if (n["fold"]?.GetValue<string>() == fold) repos.Add(n["repo"]!.GetValue<string>());
+            }
+        }
+        if (o.TryGetValue("repos-list", out var rl)) { var only = new HashSet<string>(File.ReadAllLines(rl).Where(x => x.Length > 0)); repos.RemoveWhere(r => !only.Contains(r)); }
+        var list = repos.Take(maxRepos).ToList();
+        Console.Error.WriteLine($"{list.Count} repos");
+        var refs = LoadRefs(o);
+        Repo.UseImplicitUsings = !o.ContainsKey("no-implicit-usings");
+        // namespace → (repos, files, first unresolved part)
+        var agg = new Dictionary<string, (HashSet<string> repos, int files)>(StringComparer.Ordinal);
+        var lockObj = new object(); var done = 0; var t0 = Stopwatch.StartNew();
+        Parallel.ForEach(list, new ParallelOptions { MaxDegreeOfParallelism = threads }, name =>
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(repoTimeout));
+            var ct = cts.Token; var local = new Dictionary<string, int>(StringComparer.Ordinal); string status = "ok";
+            try
+            {
+                var root = Path.Combine(reposRoot, name);
+                if (!Directory.Exists(root)) { status = "no-repo"; }
+                else
+                {
+                    var repo = Repo.Load(name, root, refs, maxFiles, ct);
+                    foreach (var tree in repo.Trees.Values)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        SemanticModel? model = null;
+                        foreach (var u in tree.GetRoot(ct).DescendantNodes(n => n is Microsoft.CodeAnalysis.CSharp.Syntax.CompilationUnitSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.BaseNamespaceDeclarationSyntax)
+                                              .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.UsingDirectiveSyntax>())
+                        {
+                            if (u.Name == null) continue;
+                            model ??= repo.Compilation.GetSemanticModel(tree);
+                            var si = model.GetSymbolInfo(u.Name, ct);
+                            if (si.Symbol != null || !si.CandidateSymbols.IsDefaultOrEmpty) continue;
+                            var ns = u.Name.ToString();
+                            local[ns] = local.GetValueOrDefault(ns) + 1;
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { status = "timeout"; }
+            catch (Exception e) { status = "error: " + e.Message; }
+            lock (lockObj)
+            {
+                done++;
+                foreach (var kv in local)
+                {
+                    if (!agg.TryGetValue(kv.Key, out var a)) agg[kv.Key] = a = (new HashSet<string>(), 0);
+                    a.repos.Add(name); agg[kv.Key] = (a.repos, a.files + kv.Value);
+                }
+                Console.Error.WriteLine($"[{done}/{list.Count} {t0.Elapsed.TotalMinutes:F1} min] {name}: {local.Count} unresolved namespaces, {status}");
+            }
+        });
+        using var w = new StreamWriter(outPath, false, new UTF8Encoding(false));
+        w.WriteLine("namespace\trepos\tfiles\trepo_names");
+        foreach (var kv in agg.OrderByDescending(kv => kv.Value.repos.Count).ThenByDescending(kv => kv.Value.files))
+            w.WriteLine($"{kv.Key}\t{kv.Value.repos.Count}\t{kv.Value.files}\t{string.Join(",", kv.Value.repos.OrderBy(x => x).Take(5))}");
+        Console.WriteLine($"{agg.Count} unresolved namespaces in {agg.Values.SelectMany(v => v.repos).Distinct().Count()} of {list.Count} repos; top 20:");
+        foreach (var kv in agg.OrderByDescending(kv => kv.Value.repos.Count).Take(20)) Console.WriteLine($"  {kv.Key}: {kv.Value.repos.Count} repos, {kv.Value.files} files");
         return 0;
     }
 }

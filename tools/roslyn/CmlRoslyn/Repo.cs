@@ -25,7 +25,9 @@ public sealed class Repo
     private Repo(string name, string root, CSharpCompilation c, Dictionary<string, SyntaxTree> trees, double secs, bool truncated)
     { Name = name; Root = root; Compilation = c; Trees = trees; LoadSeconds = secs; Truncated = truncated; }
 
-    /// <summary>What `ImplicitUsings=enable` of Microsoft.NET.Sdk(.Web) would generate (the corpus has no project files).</summary>
+    /// <summary>What `ImplicitUsings=enable` of Microsoft.NET.Sdk generates (the corpus has no project files). The Web SDK set
+    /// (Microsoft.AspNetCore.*, Microsoft.Extensions.*) is deliberately NOT added: it creates ambiguities (`IResult`, `Timer`, `ILogger`)
+    /// that cost more resolutions than they gain.</summary>
     public const string ImplicitUsings = """
         global using System;
         global using System.Collections.Generic;
@@ -34,14 +36,6 @@ public sealed class Repo
         global using System.Net.Http;
         global using System.Threading;
         global using System.Threading.Tasks;
-        global using Microsoft.AspNetCore.Builder;
-        global using Microsoft.AspNetCore.Hosting;
-        global using Microsoft.AspNetCore.Http;
-        global using Microsoft.AspNetCore.Routing;
-        global using Microsoft.Extensions.Configuration;
-        global using Microsoft.Extensions.DependencyInjection;
-        global using Microsoft.Extensions.Hosting;
-        global using Microsoft.Extensions.Logging;
         """;
 
     public static bool UseImplicitUsings = true;
