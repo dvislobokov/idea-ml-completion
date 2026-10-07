@@ -131,6 +131,19 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
 - Known gotchas: two evals must not share `--scratch` (checkpoint copy race); Gradle test env/fixture changes need `cleanTest`; 8 parallel
   Kotlin compilations run out of memory — compile worktrees sequentially (`~/work/cs-export-launch.sh`).
 
+## 2026-10-07 evening — the server will be deleted soon (user's warning at ~20:00)
+- Everything that matters is pushed: engine main (models incl. cs50m/go50m, `data/csharp-psi/*.cmlx` real C# lists + `models/cs-rank-e18-pre.cml`),
+  Go plugin `migration`, .NET plugin `master`. A unit `shard-sync` pushes new C# shards every 20 min; the checkpoints/evals/fixtures that are
+  not on GitHub are packed into `~/work/backup/ckpts-evals-2026-10-07.tar` (user downloads it to their machine).
+- Export (`cs-export-0..15`): workers run `gradlew --no-daemon` each (a shared Gradle daemon in the launcher's cgroup was killed by systemd when
+  the launcher exited → "daemon disappeared"); CodeVision + daemon timer disabled in the fixture (0db9501), `-Pml.maxCopy=400`. Rate ≈ 0.7 repos/min
+  on 16 workers — the remaining cost is the plugin's completion itself (`solutionTypes` scan per position).
+- Preliminary e18 ranker on 83 repos / 14 k lists: MRR 0.743 / top-1 0.625 vs plugin rules 0.567 / 0.409 (`ml-train l1 --shards`). Retrain on
+  everything exported before the server goes; the final numbers go to CHANGELOG e18 and `cs-rank-e18.cml` to both repos; then the plugin weigher.
+- Queue on the GPUs: `cs31m-e4-2ep` (2 epochs, ends ≈20:00) → `cs31m-e5-line` (line-FIM, `--line-rate 0.9 --single-line 0.8`, ≈21:00); each
+  exports + evaluates itself (`*-queue.out`). Project bigram cache: measured, useless (CHANGELOG). Next levers: structured context in the prompt,
+  PSI filter after `.`, distillation from Qwen2.5-Coder-7B; go50m 2 epochs / line-FIM after the C# results.
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher
