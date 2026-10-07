@@ -38,7 +38,7 @@ public static class Program
         Console.Error.WriteLine("""
             CmlRoslyn — Roslyn-based filter / context tool for the ML completion engine (see README.md)
               filter  --positions <eval.json> --repos <root> --out <jsonl> [--mode spm] [--context] [--threads 4]
-                      [--repo-timeout 900] [--max-files 8000] [--max-repos N] [--ctx-chars 1200] [--ctx-members 40]
+                      [--repo-timeout 900] [--max-files 8000] [--max-repos N] [--ctx-chars 1200] [--ctx-members 40] [--no-implicit-usings]
               context --manifest <manifest.jsonl> --repos <root> --out <dir> [--fold test] [--max-repos N] [--max-files-per-repo N]
                       [--threads 4] [--repo-timeout 900] [--ctx-chars 1200] [--ctx-members 40]
               common: --assets <project.assets.json> (default: ../refpacks/obj/project.assets.json next to the binary)
@@ -103,6 +103,7 @@ public static class Program
         }
         Console.Error.WriteLine($"{positions.Count} positions, {positions.Select(p => p.Repo).Distinct().Count()} repos, mode {mode}");
         var refs = LoadRefs(o);
+        Repo.UseImplicitUsings = !o.ContainsKey("no-implicit-usings");
 
         var byRepo = positions.GroupBy(p => p.Repo).OrderByDescending(g => g.Count()).Take(maxRepos).ToList();
         var t0 = Stopwatch.StartNew();
@@ -345,6 +346,7 @@ public static class Program
         var repos = files.OrderBy(kv => kv.Key, StringComparer.Ordinal).Take(maxRepos).ToList();
         Console.Error.WriteLine($"{repos.Count} repos, {repos.Sum(kv => Math.Min(kv.Value.Count, maxPerRepo))} files, fold {fold}");
         var refs = LoadRefs(o);
+        Repo.UseImplicitUsings = !o.ContainsKey("no-implicit-usings");
         Directory.CreateDirectory(outDir);
         var t0 = Stopwatch.StartNew();
         var done = 0; var lockObj = new object();

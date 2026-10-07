@@ -25,6 +25,27 @@ public sealed class Repo
     private Repo(string name, string root, CSharpCompilation c, Dictionary<string, SyntaxTree> trees, double secs, bool truncated)
     { Name = name; Root = root; Compilation = c; Trees = trees; LoadSeconds = secs; Truncated = truncated; }
 
+    /// <summary>What `ImplicitUsings=enable` of Microsoft.NET.Sdk(.Web) would generate (the corpus has no project files).</summary>
+    public const string ImplicitUsings = """
+        global using System;
+        global using System.Collections.Generic;
+        global using System.IO;
+        global using System.Linq;
+        global using System.Net.Http;
+        global using System.Threading;
+        global using System.Threading.Tasks;
+        global using Microsoft.AspNetCore.Builder;
+        global using Microsoft.AspNetCore.Hosting;
+        global using Microsoft.AspNetCore.Http;
+        global using Microsoft.AspNetCore.Routing;
+        global using Microsoft.Extensions.Configuration;
+        global using Microsoft.Extensions.DependencyInjection;
+        global using Microsoft.Extensions.Hosting;
+        global using Microsoft.Extensions.Logging;
+        """;
+
+    public static bool UseImplicitUsings = true;
+
     public static Repo Load(string name, string root, IReadOnlyList<MetadataReference> refs, int maxFiles, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
@@ -43,7 +64,9 @@ public sealed class Repo
         }
         var options = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true, nullableContextOptions: NullableContextOptions.Disable,
             concurrentBuild: false, reportSuppressedDiagnostics: false, warningLevel: 0);
-        var comp = CSharpCompilation.Create(Sanitize(name), trees.Values, refs, options);
+        var allTrees = trees.Values.ToList();
+        if (UseImplicitUsings) allTrees.Add(CSharpSyntaxTree.ParseText(ImplicitUsings, ParseOptions, path: "<implicit-usings>.cs"));
+        var comp = CSharpCompilation.Create(Sanitize(name), allTrees, refs, options);
         return new Repo(name, root, comp, trees, sw.Elapsed.TotalSeconds, truncated);
     }
 
