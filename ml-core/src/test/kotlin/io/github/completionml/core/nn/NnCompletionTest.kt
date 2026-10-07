@@ -17,8 +17,8 @@ class NnCompletionTest {
 
     // ------------------------------------------------------------------------------------------------ boundaries
 
-    private fun typed(before: String, after: String): String {
-        val c = NnCompletion(model(), tok, NnCompletion.Options(ctx = 400, maxNew = 8))
+    private fun typed(before: String, after: String, mode: NnCompletion.HealMode = NnCompletion.HealMode.WORD_EOL): String {
+        val c = NnCompletion(model(), tok, NnCompletion.Options(ctx = 400, maxNew = 8, healMode = mode))
         val bb = b(before)
         val boundary = c.healedBoundary(bb, b(after))
         return String(bb, boundary, bb.size - boundary, Charsets.UTF_8)
@@ -31,13 +31,31 @@ class NnCompletionTest {
         assertEquals(" ", typed("x = ", "foo\n"))                    // typed space before a word: ` foo` is one pre-token
         assertEquals("Hi", typed("e.Hi", "gh\n"))                    // partial identifier
         assertEquals(" Hi", typed("x := e, Hi", "gh\n"))             // space + partial identifier
-        assertEquals("", typed("x", " = 1\n"))                       // caret at the end of a word followed by a space
+        assertEquals("", typed("x", " = 1\n"))                       // caret at the end of a word followed by more code: left alone (WORD_EOL)
         assertEquals("", typed("func main() {\n    ", "foo()\n"))    // line start after the indentation
-        assertEquals("", typed("x = 1", "\n"))                       // caret at the end of the line
-        assertEquals("", typed("x = 1", ""))                         // no text after the caret
+        assertEquals(" 1", typed("x = 1", "\n"))                     // caret at the end of a word at the end of the line: heal from the word start
+        assertEquals(" 1", typed("x = 1", ""))                        // no text after the caret: the same
         assertEquals("", typed("x =  ", "\n"))                       // trailing whitespace before the newline
         assertEquals(" ", typed("a  ", "b\n"))                       // the run `  ` splits as ` ` + ` b`: the caret is inside ` b`
         assertEquals("", typed("", "x\n"))                           // empty file
+        // a word being typed (the live-IDE case of 2026-10-07: `return le⟨⟩` continued ` le` + `(` instead of ` len(`)
+        assertEquals(" le", typed("\treturn le", "\n}\n"))             // end of line after the caret
+        assertEquals(" le", typed("\treturn le", ")\n}\n"))            // only the paired closer after the caret
+        assertEquals("", typed("o.Get", ".Name\n"))                   // more code after the caret: WORD_EOL leaves a finished word
+        assertEquals("Get", typed("o.Get", ".Name\n", NnCompletion.HealMode.WORD))      // WORD heals it anyway
+        assertEquals("", typed("\treturn le", "\n}\n", NnCompletion.HealMode.BOUNDARY)) // the old rule
+    }
+
+    @Test fun closersAfterTheCaretAreTrimmed() {
+        val c = NnCompletion(model(), tok, NnCompletion.Options(ctx = 400, maxNew = 8))
+        fun trim(text: String, afterLine: String) = String(c.trimClosers(b(text), b(afterLine)), Charsets.UTF_8)
+        assertEquals("o.items", trim("o.items)", ")"))                 // `return len(⟨⟩)`: the editor paired the `)`
+        assertEquals("foo(x", trim("foo(x))", "))"))
+        assertEquals("x", trim("x]", "])"))                             // only the overlapping prefix of the rest goes
+        assertEquals("", trim(")", ")"))
+        assertEquals("a)", trim("a)", "b"))                             // no overlap
+        assertEquals("a.b", trim("a.b", ".c"))                          // `.` is not a closer: nothing trimmed
+        assertEquals("f(a", trim("f(a);", ");"))
     }
 
     @Test fun boundariesMatchEncoding() {
@@ -92,7 +110,7 @@ class NnCompletionTest {
 
     @Test fun constrainedGenerationStartsWithTheTypedRemainder() {
         model().use { m ->
-            val c = NnCompletion(m, tok, NnCompletion.Options(ctx = 400, maxNew = 12, repGuard = false))
+            val c = NnCompletion(m, tok, NnCompletion.Options(ctx = 400, maxNew = 12, repGuard = false, trimClosersAfterCaret = false))   // text == raw minus typed
             m.newSession(512).use { s ->
                 val cases = listOf("x := foo(" to ")\n", "\tfoo()" to ";\n", "f(\"x\"" to ")\n", "x = " to "foo\n", "e.Hi" to "gh\n",
                     "if err != nil {\n\t\treturn" to " err\n", "x" to " = 1\n", "a.B(c, \"d\"" to ", e)\n")

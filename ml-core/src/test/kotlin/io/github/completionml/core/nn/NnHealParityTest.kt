@@ -78,7 +78,8 @@ class NnHealParityTest {
                     val c = byOpts.getOrPut(key) {
                         NnCompletion(model, tok, NnCompletion.Options(
                             mode = if (r.mode == "plain") NnCompletion.Mode.PLAIN else NnCompletion.Mode.SPM,
-                            ctx = r.ctx, maxPrefix = r.maxPrefix, suffixTokens = r.suffixTokens, maxNew = r.maxNew, showThreshold = 0.8))
+                            ctx = r.ctx, maxPrefix = r.maxPrefix, suffixTokens = r.suffixTokens, maxNew = r.maxNew, showThreshold = 0.8,
+                            trimClosersAfterCaret = false))   // the fixture is the untrimmed generation; healMode WORD_EOL = make_parity_heal.py --heal word-eol
                     }
                     s.truncate(0)
                     val res = c.complete(r.path, r.before, r.after, s)
@@ -103,7 +104,7 @@ class NnHealParityTest {
     }
 
     @Test fun healedCompletionMatchesPython() {
-        assumeTrue(available(), "heal parity fixture / model / vocab not present")
+        assumeTrue(available(), "heal parity fixture / model / vocab not present: $defaultDir (${File(defaultDir, "heal.bin").isFile}), ${NnParity.defaultModel} (${NnParity.defaultModel.isFile}), ${NnParity.defaultVocab} (${NnParity.defaultVocab.isFile})")
         val all = load()
         val limit = (System.getProperty("completionml.nn.parity.heal") ?: "120").toInt()
         val records = if (all.size > limit) all.filterIndexed { i, _ -> i % ((all.size + limit - 1) / limit) == 0 } else all
@@ -125,7 +126,7 @@ class NnHealParityTest {
     }
 
     @Test fun fixtureContainsAllHealingKinds() {
-        assumeTrue(available(), "heal parity fixture not present")
+        assumeTrue(available(), "heal parity fixture not present: $defaultDir")
         val kinds = load().map { it.kind }.toSet()
         assertTrue(kinds.containsAll(listOf("typed-space", "mid-ident")), "kinds $kinds")
     }

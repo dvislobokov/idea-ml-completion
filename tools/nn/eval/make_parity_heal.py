@@ -72,6 +72,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--lang", default="go", choices=sorted(E.LANGS))
+    ap.add_argument("--heal", default="word-eol", choices=("boundary", "word", "word-eol"), help="healing boundary rule; must match NnCompletion.Options.healMode of the test (default WORD_EOL)")
     ap.add_argument("--vocab")
     ap.add_argument("--out-dir")
     ap.add_argument("--positions", type=int, default=3000, help="eval sample the fixture positions are drawn from")
@@ -84,6 +85,7 @@ def main():
     ap.add_argument("--max-new", type=int, default=48)
     a = ap.parse_args()
     E.LANG = E.LANGS[a.lang]
+    E.HEAL_MODE = a.heal
     a.vocab = a.vocab or os.path.join(E.DATA, E.LANG["vocab"])
     a.out_dir = a.out_dir or os.path.join(E.DATA, E.LANG["out_dir"], "parity-heal")
     manifest = os.path.join(E.DATA, E.LANG["manifest"]); repos = os.path.join(E.DATA, E.LANG["repos"])

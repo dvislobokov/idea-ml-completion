@@ -280,20 +280,39 @@ def line_end(text, start):
     return eol, eol_nl
 
 
-def pretoken_boundary(text, bol, cursor, eol):
-    """Last pre-token boundary at or before `cursor` (token healing). The cmlbpe scanner runs over the current line
-    including the newline byte before it (the newline token owns the indentation) and the rest of the line after the
-    cursor (what follows decides where a punctuation run or a word ends). Mirrors `BpeTokenizer.lastPreTokenBoundary`."""
+HEAL_MODE = "boundary"      # set from --heal: boundary | word | word-eol
+_CLOSERS = set(b" \t\r)]}>;,\"'`")
+
+
+def _is_word_byte(c):
+    return 65 <= c <= 90 or 97 <= c <= 122 or c == 95 or c >= 128 or 48 <= c <= 57
+
+
+def pretoken_boundary(text, bol, cursor, eol, mode=None):
+    """Healing boundary at or before `cursor`. `boundary`: the last pre-token boundary (the cmlbpe scanner runs over the
+    current line including the newline byte before it — the newline token owns the indentation — and the rest of the
+    line after the cursor: what follows decides where a punctuation run or a word ends). `word`: additionally, a caret
+    right after letters/digits (`return le⟨⟩`, a pre-token boundary because the word ends there) heals from the start of
+    that word, so the model may choose ` len` instead of continuing a finished ` le`. `word-eol`: the same only when the
+    rest of the line after the caret is empty, whitespace or closers (the typing situation; `o.Get⟨⟩.Name` stays as is).
+    Mirrors `BpeTokenizer.healBoundary`."""
+    mode = mode or HEAL_MODE
     start = bol - 1 if bol > 0 else 0
     pos = start
     last = start
+    prev = start
     for t in cmlbpe.pretokenize(text[start:eol]):
         if pos > cursor:
             break
+        prev = last
         last = pos
         pos += len(t)
     if pos <= cursor:
+        prev = last
         last = pos
+    if mode != "boundary" and last == cursor and cursor > start and _is_word_byte(text[cursor - 1]):
+        if mode == "word" or all(c in _CLOSERS for c in text[cursor:eol]):
+            return prev
     return last
 
 
@@ -1058,7 +1077,7 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--dump", type=int, default=0)
     ap.add_argument("--no-in-string", action="store_true", help="skip the extra in-string positions")
-    ap.add_argument("--heal", default="boundary", choices=("none", "boundary"),
+    ap.add_argument("--heal", default="word-eol", choices=("none", "boundary", "word", "word-eol"),
                     help="token healing: cut the prompt to the last pre-token boundary and constrain the first token(s) to the typed remainder")
     ap.add_argument("--rep-guard", dest="rep_guard", action="store_true", default=True, help="decode-time repetition guard (default on)")
     ap.add_argument("--no-rep-guard", dest="rep_guard", action="store_false")
@@ -1095,6 +1114,8 @@ def main():
     t0 = time.time()
     files = read_manifest(a.manifest)
     heal = a.heal != "none"
+    global HEAL_MODE
+    HEAL_MODE = a.heal if heal else "boundary"
     positions = sample_positions(files, a.repos, a.positions, a.stride, a.seed, not a.no_in_string, a.typed_extras, a.max_typed_extras)
     main_pos = [p for p in positions if p["kind"] not in EXTRA_KINDS]
     extra_pos = [p for p in positions if p["kind"] in EXTRA_KINDS]

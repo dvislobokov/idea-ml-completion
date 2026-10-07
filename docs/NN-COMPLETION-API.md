@@ -38,7 +38,32 @@ Steps:
    - `healMiss` — the model did not reproduce the typed remainder (only possible when the limit cut it; treat as "do not show").
 
 `Options` defaults: `mode = SPM, ctx = 2000, maxPrefix = 1450, suffixTokens = 512, maxNew = 48, prefixBytes = 40 000,
-suffixBytes = 16 000, heal = true, repGuard = true, showThreshold = 0.8, suppressPunctOnly = true`. Requires
+suffixBytes = 16 000, heal = true, healMode = WORD_EOL, repGuard = true, showThreshold = 0.7, suppressPunctOnly = true,
+trimClosersAfterCaret = true`.
+
+- **`healMode`** (2026-10-07, after the first live run in the Go plugin): a caret right after a word is itself a pre-token boundary
+  (`return le⟨⟩`), so plain boundary healing left ` le` as a finished token and the model continued it with `(`. `WORD_EOL` heals
+  from the start of that word when the rest of the line after the caret is empty, whitespace or closers (the typing situation):
+  the remainder ` le` then lets the model choose ` len` (P = 0.996 on the playground file, same answer for `l`, `le`, `len`).
+  `WORD` does it regardless of what follows (`o.Get⟨⟩.Name` is re-decided too), `BOUNDARY` is the old rule. On the 3 000 Go test
+  positions the three rules are within 0.1 p.p. of each other (they rarely sample a caret at a word end with nothing after it).
+  The Python harness mirrors it: `eval_inline.py --heal boundary|word|word-eol` (default `word-eol`), `make_parity_heal.py --heal`.
+- **`trimClosersAfterCaret`**: the editor pairs brackets and quotes, so `after` starts with `)` while the model still writes the line
+  to its end (`return len(⟨⟩)` → `o.items)`); the tail of the suggestion that repeats the closers already after the caret
+  (`)]}>;,`, quotes, backtick, spaces) is dropped in the engine (`NnCompletion.trimClosers`), so no plugin repeats the logic.
+- **`showThreshold` 0.7**: measured on 3 000 positions (SPM, healing, punct-only suppressed, line-exact precision):
+
+| gate on confProd | Go go31m-e2: shown / exact | C# cs31m-e2-lr2e3: shown / exact |
+|---|---|---|
+| ≥ 0.6 | 30.9 % / 91.0 % | 18.5 % / 90.8 % |
+| **≥ 0.7** | 25.8 % / 93.5 % | 14.2 % / 94.4 % |
+| ≥ 0.75 | 23.0 % / 94.8 % | 12.0 % / 96.1 % |
+| ≥ 0.8 | 20.4 % / 95.3 % | 10.0 % / 97.3 % |
+| ≥ 0.9 | 13.5 % / 96.5 % | 4.9 % / 98.6 % |
+
+  Leaving the newline probability out of the product does not improve the curve (at equal show rate the precision is 0.5–1 p.p.
+  lower), so the formula stays; the median newline probability on exact lines is 0.96 (p25 0.82). With closers shown
+  (`suppressPunctOnly = false`) Go at 0.7 is 43.8 % / 95.8 %. Requires
 `ctx + maxNew ≤ model.config.maxContext` and `tok.vocabSize == model.config.vocabSize`.
 
 ## Threshold guidance (3 000 positions, SPM, healed run; `eval-heal.md`)

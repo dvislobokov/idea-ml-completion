@@ -616,6 +616,15 @@ deleted on Windows while the mapping lives (Java has no explicit unmap) — `NnM
 model update in the IDE would too. Now `NnFormat.mapFiles` (default `false` on Windows, `-Dcompletionml.nn.mmap=false` elsewhere) reads the
 file into a direct buffer instead (31 MB copy, ~20 ms); `write` replaces the target with an atomic `Files.move`. The test covers both paths.
 
+**First live run of go-nn-31m-e2 in the Go plugin (0.2.199–0.2.202, reported by the plugin agent) → three engine changes** (`NnCompletion`,
+mirrored in the harness): (1) **word-start healing** — `return le⟨⟩` is a pre-token boundary (the word ends at the caret), so the model
+continued a finished ` le` with `(` (confProd 0.003–0.05) while `len` typed gave `(o.items)` at 0.73; `Options.healMode = WORD_EOL`
+heals from the start of the word when only closers/whitespace follow the caret → ` len(o.items)` for `l`, `le` and `len` alike
+(P(` len`) = 0.996; the 3 000-position evals are unchanged within 0.1 p.p., they rarely sample that situation). (2) **closers after the
+caret**: the editor pairs `)`; `trimClosersAfterCaret` drops the suggestion tail that repeats them. (3) **default gate 0.7** instead of
+0.8 (table in docs/NN-COMPLETION-API.md: Go 25.8 % shown / 93.5 % exact, C# 14.2 % / 94.4 %); dropping the newline probability from
+the product does not improve the trade-off. Heal-parity fixture regenerated with go31m-e2 (`make_parity_heal.py --heal word-eol`).
+
 **DDP** (`train.py` under `torchrun --nproc_per_node 2`): data groups striped by rank (`PackedStream(rank, world_size)`, unit test
 `test_ddp_striping`), `--tokens-per-step` stays the global batch, rank 0 builds the path-token cache and writes checkpoints carrying every rank's stream
 state (resume only with the same world size), loss all-reduced for logging, eval/metrics on rank 0, `require_backward_grad_sync` once per step.

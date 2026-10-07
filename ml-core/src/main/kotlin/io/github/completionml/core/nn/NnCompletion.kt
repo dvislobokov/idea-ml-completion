@@ -161,10 +161,23 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         val prefixBytes: Int = 40_000,
         val suffixBytes: Int = 16_000,
         val heal: Boolean = true,
+        /** Where healing cuts the prompt when the caret sits right after a word (see [HealMode]). */
+        val healMode: HealMode = HealMode.WORD_EOL,
         val repGuard: Boolean = true,
-        val showThreshold: Double = 0.8,
+        /** Gate on `confProd`; 0.7 shows ~26 % of Go / 14 % of C# positions with 93–94 % exact lines, 0.8 ~20 % / 10 % at 95–97 % (CHANGELOG e18). */
+        val showThreshold: Double = 0.7,
         val suppressPunctOnly: Boolean = true,
+        /** Drop the suggestion's tail that repeats the closers already after the caret (`return len(⟨⟩)`: the editor paired the `)`). */
+        val trimClosersAfterCaret: Boolean = true,
     )
+
+    /**
+     * Healing at a caret that is itself a pre-token boundary because a word ends there (`return le⟨⟩`). [BOUNDARY]
+     * leaves it (the model continues a finished ` le`); [WORD] heals from the start of that word, so the model may
+     * choose ` len` instead; [WORD_EOL] does so only when the rest of the line after the caret is empty, whitespace or
+     * closers — the typing situation — and leaves `o.Get⟨⟩.Name` alone.
+     */
+    enum class HealMode { BOUNDARY, WORD, WORD_EOL }
 
     class Result(
         /** Suggested text to insert at the caret (UTF-8 bytes; the typed remainder already stripped). */
@@ -223,7 +236,32 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         val line = ByteArray(before.size - from + restOfLine)
         System.arraycopy(before, from, line, 0, before.size - from)
         System.arraycopy(after, 0, line, before.size - from, restOfLine)
-        return from + tok.lastPreTokenBoundary(line, 0, before.size - from, line.size)
+        val caret = before.size - from
+        var boundary = tok.lastPreTokenBoundary(line, 0, caret, line.size)
+        if (options.healMode != HealMode.BOUNDARY && boundary == caret && caret > 0 && isWordByte(line[caret - 1]) &&
+            (options.healMode == HealMode.WORD || (0 until restOfLine).all { isCloserOrSpace(after[it]) })
+        ) boundary = tok.lastPreTokenBoundary(line, 0, caret - 1, line.size)   // the start of the word's pre-token
+        return from + boundary
+    }
+
+    /** Letters, digits, `_` and non-ASCII bytes: the pre-tokenizer's word classes (`cmlbpe.pretokenize_reference`). */
+    private fun isWordByte(b: Byte): Boolean {
+        val c = b.toInt() and 0xff
+        return c in 65..90 || c in 97..122 || c == 95 || c >= 128 || c in 48..57
+    }
+
+    private fun isCloserOrSpace(b: Byte): Boolean = b.toInt().toChar() in CLOSERS
+
+    /** The tail of [text] that repeats the start of [afterLine] and consists of closers only is dropped. */
+    fun trimClosers(text: ByteArray, afterLine: ByteArray): ByteArray {
+        var k = min(text.size, afterLine.size)
+        while (k > 0) {
+            var ok = true
+            for (i in 0 until k) if (!isCloserOrSpace(afterLine[i]) || text[text.size - k + i] != afterLine[i]) { ok = false; break }
+            if (ok) return text.copyOfRange(0, text.size - k)
+            k--
+        }
+        return text
     }
 
     /** The prompt for a caret with `before` cut at [prefixEnd]. */
@@ -249,11 +287,14 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         val boundary = if (options.heal) healedBoundary(before, after) else before.size
         val typed = before.copyOfRange(boundary, before.size)
         val prompt = buildPrompt(path, before, boundary, after)
-        return decode(prompt, typed, session)
+        return decode(prompt, typed, session, after.copyOfRange(0, lineEnd(after)))
     }
 
-    /** Greedy decode of [prompt] with the typed-remainder constraint, the stop rule and the repetition guard. */
-    fun decode(prompt: IntArray, typed: ByteArray, session: NnSession): Result {
+    /**
+     * Greedy decode of [prompt] with the typed-remainder constraint, the stop rule and the repetition guard; [afterLine]
+     * (the rest of the current line after the caret) only feeds [Options.trimClosersAfterCaret].
+     */
+    fun decode(prompt: IntArray, typed: ByteArray, session: NnSession, afterLine: ByteArray = ByteArray(0)): Result {
         val maxNew = options.maxNew
         val gen = IntArray(maxNew); val lp = FloatArray(maxNew)
         var n = 0
@@ -288,7 +329,8 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         val confMin = if (hasAny) exp(mn) else 0.0
         val raw = tok.decodeBytes(tokens)
         val healMiss = typed.isNotEmpty() && !VocabPrefixIndex.startsWith(raw, typed)
-        val text = if (typed.isNotEmpty() && !healMiss) raw.copyOfRange(typed.size, raw.size) else raw
+        var text = if (typed.isNotEmpty() && !healMiss) raw.copyOfRange(typed.size, raw.size) else raw
+        if (options.trimClosersAfterCaret && afterLine.isNotEmpty()) text = trimClosers(text, afterLine)
         val punct = punctOnly(text)
         val rep = stopKind == Stop.REPEAT || stopKind == Stop.LIMIT
         val show = confProd >= options.showThreshold && !(options.suppressPunctOnly && punct) && !rep && text.isNotEmpty()
@@ -314,6 +356,9 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
 
     companion object {
         /** No letter, digit, underscore, non-ASCII byte or quote: closers such as `);`, `}`, `)]` (or nothing at all). */
+        /** Closers and the whitespace between them, as the editor pairs them: `)` `]` `}` `>` `;` `,` quotes, backtick. */
+        const val CLOSERS = " \t\r)]}>;,\"'`"
+
         fun punctOnly(text: ByteArray): Boolean {
             for (b in text) {
                 val c = b.toInt() and 0xff
