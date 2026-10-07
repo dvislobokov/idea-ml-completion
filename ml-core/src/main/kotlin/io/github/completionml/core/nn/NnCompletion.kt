@@ -155,7 +155,9 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         val mode: Mode = Mode.SPM,
         /** Prompt token budget incl. header and suffix; must leave `maxNew` tokens below the model's maxContext. */
         val ctx: Int = 2000,
-        val maxPrefix: Int = 1450,
+        /** Prefix tail in tokens: 1024 costs nothing vs the training 1450 (C# 50.2 → 50.2 %, Go 63.6 → 63.6 %) and cuts the cold prefill ~25 %; 512 −0.8 p.p. */
+        val maxPrefix: Int = 1024,
+        /** Suffix head in tokens: 256 costs −0.6 p.p. (C#), 128 −1.7 — keep 512 unless the machine is weak. */
         val suffixTokens: Int = 512,
         val maxNew: Int = 48,
         val prefixBytes: Int = 40_000,

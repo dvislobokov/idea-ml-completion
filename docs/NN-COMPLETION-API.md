@@ -37,7 +37,7 @@ Steps:
    - **`show`** = `confProd ≥ options.showThreshold` ∧ ¬(`suppressPunctOnly` ∧ `punctOnly`) ∧ ¬`repeated` ∧ `text` non-empty;
    - `healMiss` — the model did not reproduce the typed remainder (only possible when the limit cut it; treat as "do not show").
 
-`Options` defaults: `mode = SPM, ctx = 2000, maxPrefix = 1450, suffixTokens = 512, maxNew = 48, prefixBytes = 40 000,
+`Options` defaults: `mode = SPM, ctx = 2000, maxPrefix = 1024 (was 1450: no measurable loss, ~25 % less cold prefill; suffix 256 would cost −0.6 p.p., 128 −1.7), suffixTokens = 512, maxNew = 48, prefixBytes = 40 000,
 suffixBytes = 16 000, heal = true, healMode = WORD_EOL, repGuard = true, showThreshold = 0.7, suppressPunctOnly = true,
 trimClosersAfterCaret = true`.
 
