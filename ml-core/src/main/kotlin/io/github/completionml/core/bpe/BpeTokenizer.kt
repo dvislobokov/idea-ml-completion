@@ -100,11 +100,15 @@ class BpeTokenizer private constructor(
         require(off >= 0 && len >= 0 && off + len <= bytes.size)
         val sc = caches.get()
         sc.out.size = 0
-        scan(bytes, off, off + len, sc)
+        scan(bytes, off, off + len) { s, e -> emit(bytes, s, e, sc) }
         return sc.out.a.copyOf(sc.out.size)
     }
 
-    private fun scan(b: ByteArray, from: Int, n: Int, sc: Scratch) {
+    /**
+     * The pre-tokenizer scanner over `b[from, n)`: calls `emit(start, end)` for every pre-token (before the 128-byte
+     * chunking). Inline so that the encoder's hot loop pays nothing for the callback.
+     */
+    private inline fun scan(b: ByteArray, from: Int, n: Int, emit: (Int, Int) -> Unit) {
         var i = from
         while (i < n) {
             val c = b[i].toInt() and 0xff
@@ -119,7 +123,7 @@ class BpeTokenizer private constructor(
                     else break
                 }
                 while (j < n && isW(b[j].toInt() and 0xff)) j++
-                emit(b, i, j, sc); i = j
+                emit(i, j); i = j
                 continue
             }
             if (c == 32 || c == 9) {
@@ -127,10 +131,10 @@ class BpeTokenizer private constructor(
                 while (j < n && isW(b[j].toInt() and 0xff)) j++
                 val nx = if (j < n) b[j].toInt() and 0xff else -1
                 if (nx >= 0 && b[j - 1].toInt() == 32 && !isW(nx) && nx != 10 && nx != 13) {
-                    if (j - 1 > i) emit(b, i, j - 1, sc)
+                    if (j - 1 > i) emit(i, j - 1)
                     start = j - 1; k = j
                 } else {
-                    emit(b, i, j, sc); i = j
+                    emit(i, j); i = j
                     continue
                 }
             } else {
@@ -147,8 +151,39 @@ class BpeTokenizer private constructor(
                 e = k + 1
                 while (e < n && isP(b[e].toInt() and 0xff)) e++
             }
-            emit(b, start, e, sc); i = e
+            emit(start, e); i = e
         }
+    }
+
+    /**
+     * Pre-token boundaries of `bytes[from, to)` scanned from [from]: every offset where a pre-token (after the
+     * 128-byte chunking) starts or ends, ascending, including [from] and [to]. Token healing uses the largest boundary
+     * at or before the cursor — see [lastPreTokenBoundary]. Mirrors `cmlbpe.pretokenize` offsets.
+     */
+    fun preTokenBoundaries(bytes: ByteArray, from: Int = 0, to: Int = bytes.size): IntArray {
+        require(from in 0..to && to <= bytes.size)
+        var out = IntArray(16); var n = 0
+        fun add(v: Int) { if (n == out.size) out = out.copyOf(n * 2); out[n++] = v }
+        add(from)
+        scan(bytes, from, to) { s, e ->
+            var p = s + MAX_PRETOKEN
+            while (p < e) { add(p); p += MAX_PRETOKEN }
+            add(e)
+        }
+        return out.copyOf(n)
+    }
+
+    /**
+     * Largest pre-token boundary `<= cursor` when `bytes[from, to)` is scanned from [from]. The scan must start at a
+     * real boundary (a file start, or the LF byte before the current line: the newline token owns the indentation that
+     * follows it) and should extend past the cursor to the end of the line, because what follows the cursor decides
+     * where a punctuation run or a word ends (`foo(` + `)` is one pre-token `()`).
+     */
+    fun lastPreTokenBoundary(bytes: ByteArray, from: Int, cursor: Int, to: Int): Int {
+        require(from <= cursor && cursor <= to)
+        var last = from
+        for (b in preTokenBoundaries(bytes, from, to)) { if (b > cursor) break; last = b }
+        return last
     }
 
     private fun emit(b: ByteArray, s0: Int, e: Int, sc: Scratch) {

@@ -21,8 +21,22 @@ Outputs <out>.json, <out>.md, <out>-dump.md (default out = ~/work/ml-data/<lang>
 regular/verbatim/interpolated/raw strings as single tokens, `=>` `?.` `??=` …), the e15-a n-gram reference, and the
 in-string detection for `"…"`, `@"…"`, `$"…"`. Lines are cut before a CR so CRLF files feed the model their own
 `\r\n…` suffix token; generation stops at any token starting with CR or LF.
+
+Token healing (`--heal boundary`, default; `--heal none` is the old protocol): the prompt is cut back to the last
+pre-token boundary at or before the cursor (cmlbpe scanner over the current line, so `foo(⟨⟩)`, `"x"⟨⟩)`, `foo()⟨⟩;`,
+a typed space and a partial identifier `e.Hi⟨⟩gh` are all healed), and the bytes between that boundary and the cursor
+("typed remainder") constrain decoding: at the first step(s) the vocabulary is masked to tokens that start with the
+remainder or are a prefix of it (then the rest of the remainder constrains the next step), probabilities are taken
+from the masked softmax, and the remainder is stripped from the generated text before scoring. `--heal none` with
+`--no-rep-guard --no-typed-extras` reproduces the pre-healing numbers exactly.
+Show policy: `conf_prod` (product of all token probabilities incl. the newline), punctuation-only suppression,
+repetition guard (a BPE n-gram, n ≤ 4 and ≥ 4 bytes, repeated 3× in a row stops decoding; hitting the token limit
+counts too) — reported as a shown / precision / useful-shown table per threshold. `--typed-extras` adds two kinds of
+extra positions outside the totals: `typed-space` (cursor after the space that starts the rest) and `mid-ident`
+(cursor 1–2 bytes into the next identifier) — the healing cases a plugin meets at every keystroke.
 """
 import argparse
+import bisect
 import json
 import math
 import os
@@ -117,6 +131,7 @@ LANGS = {
                "out_dir": "csharp/nn", "ngram": NGRAM_E15A, "assign": (b"=",), "dot": (b".", b"?.")},
 }
 LANG = LANGS["go"]          # set by main(); module-level so that the lexer helpers stay simple functions
+EXTRA_KINDS = ("in-string", "typed-space", "mid-ident")   # position kinds reported outside the totals
 
 
 class Tok:
@@ -198,16 +213,20 @@ def read_manifest(path, fold="test", status="ok"):
     return out
 
 
-def sample_positions(files, repos_root, n_positions, stride, seed, in_string_extra):
+def sample_positions(files, repos_root, n_positions, stride, seed, in_string_extra, typed_extras=False, max_typed_extras=400):
     """(file index, token index) pairs: uniform over the multiset of every stride-th lexer token of the fold, like
-    InlineEval's `i % stride == 0` over all files (the manifest token counts come from the Kotlin lexer, close enough)."""
+    InlineEval's `i % stride == 0` over all files (the manifest token counts come from the Kotlin lexer, close enough).
+    Extra positions (kinds `in-string`, `typed-space`, `mid-ident`) are derived from the main ones and reported outside
+    the totals; the typed extras are capped at `max_typed_extras` per kind (deterministic subsample)."""
     rng = random.Random(seed)
+    typed_rng = random.Random(seed + 11)
     cand = [(fi, k * stride) for fi, d in enumerate(files) for k in range(1, d["tokens"] // stride + 1)]
     picks = rng.sample(cand, min(n_positions, len(cand)))
     by_file = defaultdict(list)
     for fi, i in picks:
         by_file[fi].append(i)
     positions = []
+    typed_cands = defaultdict(list)
     for fi in sorted(by_file):
         d = files[fi]
         fpath = os.path.join(repos_root, d["repo"], d["path"])
@@ -225,12 +244,29 @@ def sample_positions(files, repos_root, n_positions, stride, seed, in_string_ext
             p = make_position(text, toks, code_idx[i], d, fi)
             if p is not None:
                 positions.append(p)
+                t = toks[code_idx[i]]
                 if in_string_extra:
-                    t = toks[code_idx[i]]
                     if t.kind == "string" and t.end - t.start >= 6 and b"\n" not in t.text and not t.text.startswith(b'"""'):
                         q = make_position(text, toks, code_idx[i], d, fi, cursor=t.start + string_open_len(t), kind="in-string")
                         if q is not None:
                             positions.append(q)
+                if typed_extras:
+                    cur = p["cursor"]
+                    # the user has typed the space that separates the previous token from the next one
+                    if text[cur:cur + 1] == b" " and text[cur + 1:cur + 2] not in (b" ", b"\t", b"\r", b"\n", b""):
+                        q = make_position(text, toks, code_idx[i], d, fi, cursor=cur + 1, kind="typed-space")
+                        if q is not None and q["true_lex"]:
+                            typed_cands["typed-space"].append(q)
+                    # the user is 1-2 bytes into the next identifier / keyword
+                    if t.kind in ("ident", "keyword") and t.end - t.start >= 3 and t.start >= cur:
+                        q = make_position(text, toks, code_idx[i], d, fi, cursor=t.start + 1 + (i % 2), kind="mid-ident")
+                        if q is not None and q["true_lex"]:
+                            typed_cands["mid-ident"].append(q)
+    for kind in sorted(typed_cands):
+        c = typed_cands[kind]
+        if len(c) > max_typed_extras:
+            c = typed_rng.sample(c, max_typed_extras)
+        positions.extend(c)
     return positions
 
 
@@ -242,6 +278,23 @@ def line_end(text, start):
         eol_nl = len(text)
     eol = eol_nl - 1 if eol_nl > start and text[eol_nl - 1:eol_nl] == b"\r" else eol_nl
     return eol, eol_nl
+
+
+def pretoken_boundary(text, bol, cursor, eol):
+    """Last pre-token boundary at or before `cursor` (token healing). The cmlbpe scanner runs over the current line
+    including the newline byte before it (the newline token owns the indentation) and the rest of the line after the
+    cursor (what follows decides where a punctuation run or a word ends). Mirrors `BpeTokenizer.lastPreTokenBoundary`."""
+    start = bol - 1 if bol > 0 else 0
+    pos = start
+    last = start
+    for t in cmlbpe.pretokenize(text[start:eol]):
+        if pos > cursor:
+            break
+        last = pos
+        pos += len(t)
+    if pos <= cursor:
+        last = pos
+    return last
 
 
 def make_position(text, toks, j, d, fi, cursor=None, kind=None):
@@ -288,7 +341,9 @@ def make_position(text, toks, j, d, fi, cursor=None, kind=None):
     else:
         # the lexer knows the literals ("…", @"…", $"…", """…"""): the cursor is inside one iff it is strictly within a string token
         in_string = any(x.kind == "string" and x.start < cursor < x.end for x in toks[max(0, j - 1):j + 1])
+    boundary = pretoken_boundary(text, bol, cursor, eol)
     return {"fi": fi, "repo": d["repo"], "path": d["path"], "cursor": cursor, "bol": bol, "eol": eol,
+            "boundary": boundary, "typed": text[boundary:cursor],
             "line_no": text.count(b"\n", 0, cursor) + 1, "kind": kind, "is_test": LANG["is_test"](d["path"]),
             "in_string": in_string, "line": line, "true_rest": rest, "true_code": true_code,
             "true_lex": lex_norm(true_toks, False), "true_lex_norm": lex_norm(true_toks, True), "text": text}
@@ -305,6 +360,13 @@ class Tokenizer:
         self.file_sep, self.pad = sid("<|file_sep|>"), sid("<|pad|>")
         self.vocab_size = self.vocab.vocab_size
         self.special_base = self.vocab.special_base
+        self.tokens = self.vocab.tokens                       # byte string per non-special id
+        self.tok_len = [len(t) for t in self.tokens]
+        # vocabulary prefix table: ids of the non-special tokens sorted by byte string (mirrors Kotlin VocabPrefixIndex)
+        self._sorted_ids = sorted(range(self.special_base), key=lambda i: self.tokens[i])
+        self._sorted_bytes = [self.tokens[i] for i in self._sorted_ids]
+        self._allowed_cache = {}
+        self._mask_cache = {}
 
     def encode(self, b: bytes):
         return self.enc.encode_bytes(b)
@@ -312,12 +374,64 @@ class Tokenizer:
     def decode(self, ids):
         return self.enc.decode_bytes([int(i) for i in ids])
 
+    def allowed_ids(self, rem: bytes):
+        """Ids that may be generated while `rem` (non-empty) still has to be reproduced: every token whose bytes start
+        with `rem`, plus every token that is a proper prefix of `rem` (sorted ascending)."""
+        r = self._allowed_cache.get(rem)
+        if r is None:
+            out = []
+            i = bisect.bisect_left(self._sorted_bytes, rem)
+            while i < len(self._sorted_bytes) and self._sorted_bytes[i].startswith(rem):
+                out.append(self._sorted_ids[i]); i += 1
+            for k in range(1, len(rem)):
+                pre = rem[:k]
+                i = bisect.bisect_left(self._sorted_bytes, pre)
+                while i < len(self._sorted_bytes) and self._sorted_bytes[i] == pre:
+                    out.append(self._sorted_ids[i]); i += 1
+            r = self._allowed_cache[rem] = sorted(out)
+        return r
 
-def build_prompt(tok, p, mode, ctx, suffix_tokens, with_path, max_prefix=1450):
+    def allowed_mask(self, rem: bytes, device):
+        m = self._mask_cache.get(rem)
+        if m is None:
+            m = torch.zeros(self.vocab_size, dtype=torch.bool)
+            m[self.allowed_ids(rem)] = True
+            m = self._mask_cache[rem] = m.to(device)
+        return m
+
+    def consume(self, rem: bytes, tok_id: int):
+        """Remainder left after generating `tok_id` under constraint `rem`."""
+        t = self.tokens[tok_id]
+        return b"" if t.startswith(rem) else rem[len(t):]
+
+
+def repetition(ids, tok_len, max_n=4, min_bytes=4):
+    """Decode-time repetition guard: the last 3·n generated tokens are three copies of the same n-gram (n ≤ max_n)
+    of at least `min_bytes` bytes (digit runs like `000` and `][` are exempt). Mirrors `NnCompletion.repeated`."""
+    k = len(ids)
+    for n in range(1, max_n + 1):
+        if k < 3 * n:
+            break
+        a = ids[k - n:k]
+        if a == ids[k - 2 * n:k - n] and a == ids[k - 3 * n:k - 2 * n] and sum(tok_len[i] for i in a) >= min_bytes:
+            return True
+    return False
+
+
+PUNCT_ONLY = re.compile(rb'[A-Za-z0-9_\x80-\xff"\'`]')
+
+
+def punct_only(gen: bytes):
+    """A suggestion with no letter/digit/underscore/non-ASCII byte and no quote: closers like `);`, `}`, `)]`."""
+    return PUNCT_ONLY.search(gen) is None
+
+
+def build_prompt(tok, p, mode, ctx, suffix_tokens, with_path, max_prefix=1450, heal=False):
     """Prompt of at most `ctx` tokens: header + prefix tail (<= max_prefix) [+ suffix head (<= suffix_tokens)].
     Mirrors the training documents (data.py: FIM doc <= seq_len - 8 with suffix <= 512, middle <= 256, prefix = the
-    rest), so that ctx + max_new <= max_context and the model never runs past the trained context."""
-    text, cur = p["text"], p["cursor"]
+    rest), so that ctx + max_new <= max_context and the model never runs past the trained context.
+    With `heal` the prefix ends at the pre-token boundary (`p["boundary"]`) instead of the cursor."""
+    text, cur = p["text"], p["boundary"] if heal else p["cursor"]
     hdr = [tok.file_sep] + (tok.encode(p["path"].encode() + b"\n") if with_path else [])
     # prefix: last ~40 KB, cut forward to a line start so that the pre-tokenisation is the same as in training
     a = max(0, cur - 40000)
@@ -384,11 +498,16 @@ class Generator:
             return m.logits(x)[:, -1].float()
 
     @torch.no_grad()
-    def generate(self, prompts, max_new, true_first=None):
+    def generate(self, prompts, max_new, true_first=None, constraints=None, rep_guard=False):
         """prompts: list of id lists. Returns per prompt: (generated ids without the stop token, their probs,
-        prob of the stop/last token, stop kind, first-step top-1 id, prob of the true first token)."""
+        prob of the stop/last token, stop kind, first-step top-1 id, prob of the true first token).
+        `constraints`: per prompt the typed remainder (bytes, may be empty) that the generation must start with — while
+        a remainder is pending, the logits are masked to `Tokenizer.allowed_ids` and the probabilities come from the
+        masked softmax. `rep_guard`: stop (kind "repeat") when `repetition()` fires on the generated ids."""
         dev = self.dev
         B = len(prompts)
+        rem = [b""] * B if constraints is None else [c or b"" for c in constraints]
+        tok_len = self.tok.tok_len
         L = max(len(p) for p in prompts)
         lens = torch.tensor([len(p) for p in prompts], device=dev)
         ids = torch.full((B, L), self.tok.pad, dtype=torch.long, device=dev)
@@ -406,6 +525,12 @@ class Generator:
         done = [False] * B
         top1_first = None; p_true = None
         for step in range(max_new + 1):
+            active = [b for b in range(B) if rem[b] and not done[b]]
+            if active:
+                mask = torch.ones(B, self.tok.vocab_size, dtype=torch.bool, device=dev)
+                for b in active:
+                    mask[b] = self.tok.allowed_mask(rem[b], dev)
+                logits = logits.masked_fill(~mask, float("-inf"))
             pr = torch.softmax(logits, dim=-1)
             pmax, nxt = pr.max(dim=-1)
             if step == 0:
@@ -424,6 +549,10 @@ class Generator:
                     done[b] = True; stop_p[b] = None; stop_kind[b] = "limit"
                 else:
                     gen[b].append(nl[b]); probs[b].append(pl[b])
+                    if rem[b]:
+                        rem[b] = self.tok.consume(rem[b], nl[b])
+                    if rep_guard and repetition(gen[b], tok_len):
+                        done[b] = True; stop_p[b] = None; stop_kind[b] = "repeat"
             if all(done):
                 break
             valid = torch.cat((valid, torch.ones(B, 1, dtype=torch.bool, device=dev)), dim=1)
@@ -463,9 +592,23 @@ def selftest(model, tok, gen, device):
 
 # ----------------------------------------------------------------------------------------------------- metrics
 
-def evaluate_position(tok, p, res, max_new):
+def true_first_id(tok, p, heal):
+    """Id of the first BPE token of the truth as the model sees it: with healing the truth starts at the boundary
+    (typed remainder + rest of the line)."""
+    ids = tok.encode(p["text"][p["boundary"]:p["eol"]] if heal else p["true_rest"])
+    return ids[0] if ids else -1
+
+
+def evaluate_position(tok, p, res, max_new, heal=False):
     gen_ids, probs, stop_p, stop_kind, top1, p_true = res
     gen_bytes = tok.decode(gen_ids)
+    typed = p["typed"] if heal else b""
+    heal_miss = False
+    if typed:
+        if gen_bytes.startswith(typed):
+            gen_bytes = gen_bytes[len(typed):]
+        else:
+            heal_miss = True      # only possible when the token limit cut the generation inside the remainder
     gen_code, gen_toks = code_part(gen_bytes)
     gl, gln = lex_norm(gen_toks, False), lex_norm(gen_toks, True)
     tl, tln = p["true_lex"], p["true_lex_norm"]
@@ -480,7 +623,7 @@ def evaluate_position(tok, p, res, max_new):
     allp = probs + ([stop_p] if stop_p is not None else [])
     conf_min = min(allp) if allp else 0.0
     conf_prod = float(np.prod(allp)) if allp else 0.0
-    true_first_ids = tok.encode(p["true_rest"])
+    tf = true_first_id(tok, p, heal)
     return {"repo": p["repo"], "path": p["path"], "line": p["line_no"], "kind": p["kind"], "is_test": p["is_test"],
             "in_string": p["in_string"], "true": p["true_code"].decode("utf-8", "replace"),
             "gen": gen_bytes.decode("utf-8", "replace"), "n_bpe": n, "stop": stop_kind,
@@ -490,7 +633,33 @@ def evaluate_position(tok, p, res, max_new):
             "first_ok": match >= 1, "first_ok_norm": match_n >= 1,
             "ok3": match >= min(3, len(tl)), "ok3_strict": match >= 3,
             "ok3_norm": match_n >= min(3, len(tln)), "exact": exact, "exact_norm": exact_n,
-            "bpe_top1": bool(true_first_ids) and top1 == true_first_ids[0], "p_true_first": p_true}
+            "bpe_top1": tf >= 0 and top1 == tf, "p_true_first": p_true,
+            # healing and show policy
+            "typed": typed.decode("utf-8", "replace"), "healed": bool(typed), "heal_miss": heal_miss,
+            "punct_only": punct_only(gen_bytes), "repeated": stop_kind in ("repeat", "limit"),
+            "useful": (not punct_only(gen_bytes)) and len(gl) >= 2}
+
+
+POLICY_FILTERS = (("none", lambda r: True),
+                  ("no punct-only", lambda r: not r["punct_only"]),
+                  ("rep guard", lambda r: not r["repeated"]),
+                  ("both", lambda r: not r["punct_only"] and not r["repeated"]))
+
+
+def policy_table(recs):
+    """Show policy: for every conf_prod threshold × filter: shown share, whole-line precision of the shown, share of
+    positions with a useful suggestion shown (≥2 lexical tokens, not punctuation only) and its precision."""
+    n = len(recs)
+    out = {}
+    for thr in THRESHOLDS:
+        for fname, f in POLICY_FILTERS:
+            shown = [r for r in recs if r["conf_prod"] >= thr and f(r)]
+            useful = [r for r in shown if r["useful"]]
+            out[f"{thr}|{fname}"] = {"thr": thr, "filter": fname, "shown": len(shown) / n, "n_shown": len(shown),
+                                     "prec_exact": rate([r["exact"] for r in shown]),
+                                     "useful_shown": len(useful) / n, "prec_useful": rate([r["exact"] for r in useful]),
+                                     "mean_chars": rate([len(r["gen"]) for r in shown])}
+    return out
 
 
 def rate(xs):
@@ -512,7 +681,10 @@ def summarise(recs):
          "bpe_top1": rate([r["bpe_top1"] for r in recs]),
          "mean_match": rate([r["match"] for r in recs]), "mean_rest_len": rate([r["rest_len"] for r in recs]),
          "stop_newline": rate([r["stop"] == "newline" for r in recs]), "stop_limit": rate([r["stop"] == "limit" for r in recs]),
-         "thresholds": {}, "calibration": {}}
+         "stop_repeat": rate([r["stop"] == "repeat" for r in recs]),
+         "healed": rate([r["healed"] for r in recs]), "heal_miss": sum(r["heal_miss"] for r in recs),
+         "punct_only": rate([r["punct_only"] for r in recs]),
+         "policy": policy_table(recs), "thresholds": {}, "calibration": {}}
     for cname in ("conf_gm3", "conf_min", "conf_prod"):
         tab = {}
         for thr in THRESHOLDS:
@@ -540,9 +712,22 @@ def len_bucket(k):
     return "1-2" if k <= 2 else "3-5" if k <= 5 else "6-10" if k <= 10 else "11+"
 
 
+def typed_group(r, counts):
+    """Healing group of a record: `at boundary` (nothing typed past a pre-token boundary), or the typed remainder
+    itself when it is frequent, else `other typed`."""
+    if not r["healed"]:
+        return "at boundary"
+    return f"typed {r['typed']!r}" if counts[r["typed"]] >= 5 else "other typed"
+
+
 def breakdowns(recs):
+    counts = defaultdict(int)
+    for r in recs:
+        if r["healed"]:
+            counts[r["typed"]] += 1
     groups = {"kind": lambda r: r["kind"], "is_test": lambda r: "test file" if r["is_test"] else "non-test",
-              "rest_len": lambda r: len_bucket(r["rest_len"]), "in_string": lambda r: "in string" if r["in_string"] else "code"}
+              "rest_len": lambda r: len_bucket(r["rest_len"]), "in_string": lambda r: "in string" if r["in_string"] else "code",
+              "healing": lambda r: typed_group(r, counts)}
     out = {}
     for gname, key in groups.items():
         g = defaultdict(list)
@@ -552,10 +737,12 @@ def breakdowns(recs):
         for k in sorted(g, key=lambda x: (-len(g[x]), x)):
             rs = g[k]
             shown = [r for r in rs if r["conf_gm3"] >= 0.8]
+            shown_p = [r for r in rs if r["conf_prod"] >= 0.8 and not r["punct_only"] and not r["repeated"]]
             out[gname][k] = {"n": len(rs), "first_lex_ok": rate([r["first_ok"] for r in rs]), "ok3": rate([r["ok3"] for r in rs]),
                              "line_exact": rate([r["exact"] for r in rs]), "line_exact_norm": rate([r["exact_norm"] for r in rs]),
                              "bpe_top1": rate([r["bpe_top1"] for r in rs]),
-                             "shown_0.8": len(shown) / len(rs), "prec_0.8": rate([r["ok3"] for r in shown])}
+                             "shown_0.8": len(shown) / len(rs), "prec_0.8": rate([r["ok3"] for r in shown]),
+                             "policy_shown_0.8": len(shown_p) / len(rs), "policy_prec_0.8": rate([r["exact"] for r in shown_p])}
     return out
 
 
@@ -606,8 +793,24 @@ def markdown(report):
     row("≥3 right, unconditional (strict)", "—", lambda s: f"{pct(s['ok3'])} ({pct(s['ok3_strict'])}) %")
     row("next BPE token top-1", "—", lambda s: f3(s["bpe_top1"]))
     row("mean matched lexical tokens / mean rest length", "—", lambda s: f"{s['mean_match']:.2f} / {s['mean_rest_len']:.2f}")
-    row("stopped at newline / hit 48-token limit", "—", lambda s: f"{pct(s['stop_newline'])} / {pct(s['stop_limit'])} %")
+    row("stopped at newline / hit 48-token limit / repetition stop", "—", lambda s: f"{pct(s['stop_newline'])} / {pct(s['stop_limit'])} / {pct(s['stop_repeat'])} %")
+    row("positions healed (typed remainder non-empty)", "—", lambda s: f"{pct(s['healed'])} % (remainder not reproduced: {s['heal_miss']})")
     L.append("")
+    L.append(f"Token healing: `{info.get('heal', 'none')}`; repetition guard: {'on' if info.get('rep_guard') else 'off'}.\n")
+    for m in modes:
+        s = report["modes"][m]["summary"]
+        L.append(f"## {m}: show policy (gate conf_prod; shown % / line exact % of shown / useful shown % (its precision %) / mean chars)\n")
+        L.append("`useful` = at least 2 lexical tokens and not punctuation only. Filters: `no punct-only` drops suggestions "
+                 "without a letter, digit or quote (`);`, `}`, `)]`); `rep guard` drops lines stopped by the repetition guard or the token limit.\n")
+        L.append("| thr | " + " | ".join(f for f, _ in POLICY_FILTERS) + " |")
+        L.append("|---|" + "---|" * len(POLICY_FILTERS))
+        for thr in THRESHOLDS:
+            cells = []
+            for fname, _ in POLICY_FILTERS:
+                t = s["policy"][f"{thr}|{fname}"]
+                cells.append(f"{pct(t['shown'])} / {pct(t['prec_exact'])} / {pct(t['useful_shown'])} ({pct(t['prec_useful'])}) / {t['mean_chars']:.0f}")
+            L.append(f"| {thr} | " + " | ".join(cells) + " |")
+        L.append("")
     for m in modes:
         s = report["modes"][m]["summary"]
         L.append(f"## {m}: thresholds for the three confidence definitions\n")
@@ -625,11 +828,12 @@ def markdown(report):
             L.append(f"| {c['bin']} | {c['n']} | {pct(c['share'])} | {pct(c['ok3'])} | {pct(c['exact'])} | {pct(c['first_ok'])} |")
         L.append("")
         L.append(f"## {m}: breakdowns\n")
-        L.append("| group | value | n | first tok % | ≥3 right % | line exact % | [norm] % | BPE top-1 | shown@0.8 % | prec@0.8 % |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        L.append("`policy@0.8` = conf_prod ≥ 0.8, no punctuation-only, repetition guard: shown % and line-exact precision %.\n")
+        L.append("| group | value | n | first tok % | ≥3 right % | line exact % | [norm] % | BPE top-1 | gm3 shown@0.8 % | prec@0.8 % | policy@0.8 shown % | prec % |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for gname, g in report["modes"][m]["breakdowns"].items():
             for k, v in g.items():
-                L.append(f"| {gname} | {k} | {v['n']} | {pct(v['first_lex_ok'])} | {pct(v['ok3'])} | {pct(v['line_exact'])} | {pct(v['line_exact_norm'])} | {f3(v['bpe_top1'])} | {pct(v['shown_0.8'])} | {pct(v['prec_0.8'])} |")
+                L.append(f"| {gname} | {k} | {v['n']} | {pct(v['first_lex_ok'])} | {pct(v['ok3'])} | {pct(v['line_exact'])} | {pct(v['line_exact_norm'])} | {f3(v['bpe_top1'])} | {pct(v['shown_0.8'])} | {pct(v['prec_0.8'])} | {pct(v['policy_shown_0.8'])} | {pct(v['policy_prec_0.8'])} |")
         L.append("")
         if report["modes"][m].get("in_string_extra"):
             e = report["modes"][m]["in_string_extra"]
@@ -637,6 +841,15 @@ def markdown(report):
                      f"line exact {pct(e['line_exact'])} %, first lexical token {pct(e['first_lex_ok'])} %, "
                      f"shown@0.8 {pct(e['thresholds']['conf_gm3']['0.8']['shown'])} %, precision (line exact) "
                      f"{pct(e['thresholds']['conf_gm3']['0.8']['prec_exact'])} %.\n")
+        if report["modes"][m].get("extras"):
+            L.append(f"### {m}: extra position kinds (not in the totals)\n")
+            L.append("| kind | n | healed % | first tok % | line exact % | ≤8 exact % | policy@0.8 shown % / prec % | policy@0.7 shown % / prec % |")
+            L.append("|---|---|---|---|---|---|---|---|")
+            for kind, e in report["modes"][m]["extras"].items():
+                p8 = e["policy"]["0.8|both"]; p7 = e["policy"]["0.7|both"]
+                L.append(f"| {kind} | {e['n']} | {pct(e['healed'])} | {pct(e['first_lex_ok'])} | {pct(e['line_exact'])} | {pct(e['line_exact_le8'])} | "
+                         f"{pct(p8['shown'])} / {pct(p8['prec_exact'])} | {pct(p7['shown'])} / {pct(p7['prec_exact'])} |")
+            L.append("")
     if len(modes) >= 2:
         L.append("## Modes per position (line exact)\n")
         a = modes[0]; pa = report["modes"][a]["positions"]
@@ -657,6 +870,10 @@ def markdown(report):
     L.append("- The cursor is placed after the previous token of the line (not after a typed space). Since the FIM data fix "
              "(bounded FIM documents that never straddle a window) the prompt layout — header, prefix tail, ≤512-token suffix — "
              "is exactly what training shows.")
+    if info.get("heal", "none") != "none":
+        L.append("- Token healing: where the cursor is inside a pre-token (punctuation run such as `);`, `()`, `\")`; a typed space; "
+                 "a partial identifier) the prompt ends at the pre-token boundary and the generation is constrained to start with "
+                 "the typed bytes, which are then stripped. Probabilities of constrained steps come from the masked softmax.")
     return "\n".join(L) + "\n"
 
 
@@ -732,6 +949,14 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--dump", type=int, default=0)
     ap.add_argument("--no-in-string", action="store_true", help="skip the extra in-string positions")
+    ap.add_argument("--heal", default="boundary", choices=("none", "boundary"),
+                    help="token healing: cut the prompt to the last pre-token boundary and constrain the first token(s) to the typed remainder")
+    ap.add_argument("--rep-guard", dest="rep_guard", action="store_true", default=True, help="decode-time repetition guard (default on)")
+    ap.add_argument("--no-rep-guard", dest="rep_guard", action="store_false")
+    ap.add_argument("--typed-extras", dest="typed_extras", action="store_true", default=True,
+                    help="extra typed-space / mid-ident positions outside the totals (default on)")
+    ap.add_argument("--no-typed-extras", dest="typed_extras", action="store_false")
+    ap.add_argument("--max-typed-extras", type=int, default=400, help="cap per extra kind")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--scratch", help="where the checkpoint copy goes (default ~/work/ml-data/<lang>/nn/eval-tmp)")
     a = ap.parse_args()
@@ -759,25 +984,29 @@ def main():
 
     t0 = time.time()
     files = read_manifest(a.manifest)
-    positions = sample_positions(files, a.repos, a.positions, a.stride, a.seed, not a.no_in_string)
-    main_pos = [p for p in positions if p["kind"] != "in-string"]
-    extra_pos = [p for p in positions if p["kind"] == "in-string"]
-    print(f"{len(main_pos)} positions (+{len(extra_pos)} in-string) in {len({p['fi'] for p in positions})} files, "
-          f"{time.time() - t0:.0f} s", flush=True)
+    heal = a.heal != "none"
+    positions = sample_positions(files, a.repos, a.positions, a.stride, a.seed, not a.no_in_string, a.typed_extras, a.max_typed_extras)
+    main_pos = [p for p in positions if p["kind"] not in EXTRA_KINDS]
+    extra_pos = [p for p in positions if p["kind"] in EXTRA_KINDS]
+    n_extra = {k: sum(1 for p in extra_pos if p["kind"] == k) for k in EXTRA_KINDS}
+    print(f"{len(main_pos)} positions (+{n_extra}) in {len({p['fi'] for p in positions})} files, "
+          f"{time.time() - t0:.0f} s; healed (typed remainder non-empty): {sum(1 for p in main_pos if p['typed'])} main positions", flush=True)
 
     modes = a.modes.split(",")
     report = {"info": dict(info, ckpt=a.ckpt, lang=a.lang, vocab=a.vocab, manifest=a.manifest, n_fold_files=len(files),
-                           n_positions=len(main_pos), n_in_string=len(extra_pos),
+                           n_positions=len(main_pos), n_in_string=n_extra["in-string"], n_extra=n_extra,
                            n_files=len({p["fi"] for p in main_pos}), stride=a.stride, seed=a.seed, ctx=a.ctx,
                            suffix_tokens=a.suffix_tokens, max_prefix=a.max_prefix, max_new=a.max_new, batch=a.batch, modes=modes,
+                           heal=a.heal, rep_guard=a.rep_guard, typed_extras=a.typed_extras,
                            time_modes_s={}, time_prompts_s=0.0), "ngram_ref": LANG["ngram"], "modes": {}}
     positions_by_mode = {}
     for mode in modes:
         t0 = time.time()
         allpos = main_pos + extra_pos
-        prompts = [build_prompt(tok, p, mode, a.ctx, a.suffix_tokens, info["with_path"], a.max_prefix) for p in allpos]
+        prompts = [build_prompt(tok, p, mode, a.ctx, a.suffix_tokens, info["with_path"], a.max_prefix, heal) for p in allpos]
         assert max(map(len, prompts)) + a.max_new <= max_context, (max(map(len, prompts)), a.max_new, max_context)
-        true_first = [(tok.encode(p["true_rest"]) or [-1])[0] for p in allpos]
+        true_first = [true_first_id(tok, p, heal) for p in allpos]
+        constraints = [p["typed"] if heal else b"" for p in allpos]
         t_prompt = time.time() - t0
         report["info"]["time_prompts_s"] += t_prompt
         order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))   # length-sorted batches: less padding
@@ -786,17 +1015,22 @@ def main():
         for k in range(0, len(order), a.batch):
             idx = order[k:k + a.batch]
             tf = [true_first[i] if true_first[i] >= 0 else 0 for i in idx]
-            res = gen.generate([prompts[i] for i in idx], a.max_new, true_first=tf)
+            res = gen.generate([prompts[i] for i in idx], a.max_new, true_first=tf,
+                               constraints=[constraints[i] for i in idx] if heal else None, rep_guard=a.rep_guard)
             for i, r in zip(idx, res):
                 results[i] = r
             if (k // a.batch) % 50 == 0:
                 print(f"  {mode}: {k + len(idx)}/{len(prompts)} ({time.time() - t1:.0f} s)", flush=True)
         t_gen = time.time() - t1
-        recs = [evaluate_position(tok, p, r, a.max_new) for p, r in zip(allpos, results)]
+        recs = [evaluate_position(tok, p, r, a.max_new, heal) for p, r in zip(allpos, results)]
         main_recs, extra_recs = recs[:len(main_pos)], recs[len(main_pos):]
+        in_string_recs = [r for r in extra_recs if r["kind"] == "in-string"]
+        extras = {k: summarise([r for r in extra_recs if r["kind"] == k]) for k in EXTRA_KINDS if n_extra[k]}
         report["modes"][mode] = {"summary": summarise(main_recs), "breakdowns": breakdowns(main_recs),
-                                 "in_string_extra": summarise(extra_recs) if extra_recs else None,
-                                 "positions": main_recs, "in_string_positions": extra_recs,
+                                 "in_string_extra": summarise(in_string_recs) if in_string_recs else None,
+                                 "extras": extras,
+                                 "positions": main_recs, "in_string_positions": in_string_recs,
+                                 "extra_positions": [r for r in extra_recs if r["kind"] != "in-string"],
                                  "mean_prompt_tokens": float(np.mean([len(p) for p in prompts]))}
         report["info"]["time_modes_s"][mode] = t_gen
         positions_by_mode[mode] = (main_recs, main_pos)

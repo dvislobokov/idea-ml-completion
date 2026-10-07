@@ -18,7 +18,7 @@ and stop rules of the inline eval (`~/work/nn/eval/eval_inline.py`).
    - `behav.bin` — 500 positions × {plain, spm}: prompt ids, true rest of the line, the eval's generated line (the
      bf16 batched run, from the JSON) and a fresh fp32 fake-quantised greedy run with the eval's stop rule.
    - `meta.json` — provenance (checkpoint, vocab sha256, position indices).
-2. **Kotlin** — `ml-core/src/test/.../nn/NnParity.kt` (test scope). `InlinePrompt` rebuilds the prompts
+2. **Kotlin** — `ml-core/src/test/.../nn/NnParity.kt` (test scope). `InlinePrompt` (main scope since the token-healing work, `core.nn.NnCompletion.kt`) rebuilds the prompts
    (`<|file_sep|> path\n prefix` and SPM `<|fim_prefix|><|fim_suffix|> suffix <|fim_middle|> header prefix`, budgets
    ctx 2000 / prefix ≤1450 / suffix ≤512) and the stop set (every token starting with LF/CR + all specials).
    Per kernel path: prefill → logits at the last prompt position (max |Δlogit|, argmax); teacher-forced pass over the
@@ -127,8 +127,26 @@ written) were fixed during the run.
 
 ## Files
 
-- `ml-core/src/test/kotlin/io/github/completionml/core/nn/NnParity.kt` — `InlinePrompt`, fixture reader, parity run (main).
+- `ml-core/src/test/kotlin/io/github/completionml/core/nn/NnParity.kt` — fixture reader, parity run (main); `InlinePrompt` lives in `ml-core/src/main/.../nn/NnCompletion.kt`.
 - `ml-core/src/test/kotlin/io/github/completionml/core/nn/NnParityTest.kt` — JUnit test (skipped without the fixture).
 - `ml-core/src/test/kotlin/io/github/completionml/core/nn/NnBench.kt` — `--file`, `--prompt-file`, load/prepare timings.
 - `~/work/nn/eval/make_parity.py`, `~/work/nn/eval/score_parity.py` — fixture writer and scorer (outside the repo).
 - `~/work/ml-data/go/nn/parity/` — fixture (8.4 MB) and the Kotlin `kotlin-*.tsv` outputs.
+
+## C# fixture (2026-10-07)
+
+`make_parity.py` is language-aware now (`--lang`, or the language of the eval JSON; manifest / repos / vocabulary from the
+harness's per-language table). C# fixture: `make_parity.py --lang csharp --ckpt cs31m-e1/ckpt-latest.pt --eval-json
+eval-inline-step5388.json --vocab cs-16384.bpe --out-dir ~/work/ml-data/csharp/nn/parity` (32 logit prompts, 500 × 2
+behavioural positions; fp32-fq vs the bf16 eval line agreement 468/500 plain, 472/500 spm). `NnParityTest` with
+`CML_NN_MODEL=cs-nn-31m-e1.cml CML_BPE_VOCAB=cs-16384.bpe CML_NN_PARITY=…/csharp/nn/parity` (40-position subset, 4 threads):
+
+| kernels | vs fq-int8: max \|Δlogit\| / argmax / greedy-48 identical | vs float: argmax / greedy-48 | behavioural: same line as fp32-fq / as eval | line exact kotlin / fq / eval |
+|---|---|---|---|---|
+| scalar | 0.0000 / 32/32 / 32/32 | 31/32 / 25/32 | 40/40 / 40/40 | 42.5 / 42.5 / 42.5 % |
+| native f32 (AVX-512) | 0.0000 / 32/32 / 32/32 | 31/32 / 25/32 | 40/40 / 40/40 | 42.5 / 42.5 / 42.5 % |
+| native q8 (VNNI) | 0.34 / 30/32 / 26/32 | 31/32 / 23/32 | 39/40 / 39/40 | 42.5 / 42.5 / 42.5 % |
+
+Tokenizer: 32/32 prompts identical (C# vocabulary, CRLF files included). Same picture as Go: scalar and native f32 are
+exact up to summation order; q8 flips near-ties (C# logits are flatter — ppl 3.97 vs 2.13 — hence one more argmax
+disagreement than on Go at the same |Δlogit|).

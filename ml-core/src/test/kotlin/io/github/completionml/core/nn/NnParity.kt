@@ -13,41 +13,6 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
- * Prompt assembly of the inline-completion eval, byte-for-byte the same as `eval_inline.build_prompt` (Python):
- * header `<|file_sep|> path \n`, prefix tail, and for SPM `<|fim_prefix|> <|fim_suffix|> suffix <|fim_middle|> header prefix`.
- * The caller supplies the prefix already cut to ~40 KB at a line start (the eval does that before encoding).
- */
-object InlinePrompt {
-    fun header(tok: BpeTokenizer, path: ByteArray): IntArray = intArrayOf(tok.fileSep) + tok.encodeBytes(path + "\n".toByteArray())
-
-    private fun tail(a: IntArray, n: Int): IntArray = if (n <= 0 || n >= a.size) a else a.copyOfRange(a.size - n, a.size)
-
-    fun plain(tok: BpeTokenizer, path: ByteArray, prefix: ByteArray, ctx: Int): IntArray {
-        val hdr = header(tok, path)
-        return hdr + tail(tok.encodeBytes(prefix), ctx - hdr.size)
-    }
-
-    fun spm(tok: BpeTokenizer, path: ByteArray, prefix: ByteArray, suffix: ByteArray, ctx: Int, maxPrefix: Int, suffixTokens: Int): IntArray {
-        val hdr = header(tok, path)
-        val suf = tok.encodeBytes(suffix).let { if (it.size > suffixTokens) it.copyOf(suffixTokens) else it }
-        val budget = minOf(maxPrefix, ctx - hdr.size - suf.size - 3)
-        require(budget > 0) { "no room for the prefix: ctx $ctx, header ${hdr.size}, suffix ${suf.size}" }
-        return intArrayOf(tok.fimPrefix, tok.fimSuffix) + suf + intArrayOf(tok.fimMiddle) + hdr + tail(tok.encodeBytes(prefix), budget)
-    }
-
-    /** Ids that end a line in the eval's stop rule: every token starting with LF/CR, and every special token. */
-    fun stopIds(tok: BpeTokenizer): IntArray {
-        val out = ArrayList<Int>()
-        for (id in 0 until tok.specialBase) {
-            val b = tok.tokenBytes(id)
-            if (b.isNotEmpty() && (b[0] == '\n'.code.toByte() || b[0] == '\r'.code.toByte())) out += id
-        }
-        for (id in tok.specialBase until tok.vocabSize) out += id
-        return out.toIntArray()
-    }
-}
-
-/**
  * End-to-end parity of the Kotlin inference with the PyTorch model on real trained weights. Fixture written by
  * `~/work/nn/eval/make_parity.py` (see its docstring for the layout), default location `~/work/ml-data/go/nn/parity`
  * (env `CML_NN_PARITY`), model `~/work/ml-data/go/models/go-nn-31m-e1.cml` (env `CML_NN_MODEL`), vocabulary

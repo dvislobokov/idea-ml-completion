@@ -17,6 +17,10 @@ against. Binary layout: big-endian, Java DataInputStream-compatible (readUTF str
 
   ~/work/nn/.venv/bin/python -I make_parity.py --ckpt ~/work/ml-data/go/nn/go31m-e1/ckpt-latest.pt \
       --eval-json ~/work/ml-data/go/nn/eval-inline-step6484.json --out-dir ~/work/ml-data/go/nn/parity
+  ~/work/nn/.venv/bin/python -I make_parity.py --lang csharp --ckpt ~/work/ml-data/csharp/nn/cs31m-e1/ckpt-latest.pt \
+      --eval-json ~/work/ml-data/csharp/nn/eval-inline-step5388.json --out-dir ~/work/ml-data/csharp/nn/parity
+The language (lexer, manifest, repos root, vocabulary) comes from the eval JSON (`info.lang`) or `--lang`; the prompts
+are rebuilt with `--heal none` semantics (the cursor as the eval placed it), whatever the harness default is now.
 """
 import argparse
 import copy
@@ -117,8 +121,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--eval-json", required=True)
-    ap.add_argument("--vocab", default=E.DEFAULT_VOCAB)
-    ap.add_argument("--out-dir", default=os.path.join(HOME, "work/ml-data/go/nn/parity"))
+    ap.add_argument("--lang", choices=sorted(E.LANGS), help="default: the eval JSON's language")
+    ap.add_argument("--vocab", help="default ~/work/ml-data/tokenizer/<go|cs>-16384.bpe")
+    ap.add_argument("--manifest", help="default ~/work/ml-data/<lang>/prepared/manifest.jsonl")
+    ap.add_argument("--repos", help="default ~/work/ml-data/<lang>/repos")
+    ap.add_argument("--out-dir", help="default ~/work/ml-data/<lang>/nn/parity")
     ap.add_argument("--n-logits", type=int, default=32)
     ap.add_argument("--n-behav", type=int, default=500)
     ap.add_argument("--seed", type=int, default=3)
@@ -127,11 +134,17 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    os.makedirs(a.out_dir, exist_ok=True)
-
     rep = json.load(open(a.eval_json))
     info = rep["info"]
+    lang = a.lang or info.get("lang", "go")
+    E.LANG = E.LANGS[lang]
+    a.vocab = a.vocab or os.path.join(E.DATA, E.LANG["vocab"])
+    a.manifest = a.manifest or os.path.join(E.DATA, E.LANG["manifest"])
+    a.repos = a.repos or os.path.join(E.DATA, E.LANG["repos"])
+    a.out_dir = a.out_dir or os.path.join(E.DATA, E.LANG["out_dir"], "parity")
+    assert info.get("heal", "none") == "none", "the eval JSON must come from a --heal none run (prompts end at the cursor)"
     modes = ["plain", "spm"]
+    os.makedirs(a.out_dir, exist_ok=True)
     for mo in modes:
         assert mo in rep["modes"], f"eval JSON has no mode {mo}"
     tok = E.Tokenizer(a.vocab)
@@ -149,8 +162,8 @@ def main():
     stop = stop.to(dev)
 
     t0 = time.time()
-    files = E.read_manifest()
-    positions = E.sample_positions(files, info["n_positions"], info["stride"], info["seed"], info["n_in_string"] > 0)
+    files = E.read_manifest(a.manifest)
+    positions = E.sample_positions(files, a.repos, info["n_positions"], info["stride"], info["seed"], info["n_in_string"] > 0)
     main_pos = [p for p in positions if p["kind"] != "in-string"]
     assert len(main_pos) == info["n_positions"], (len(main_pos), info["n_positions"])
     print(f"{len(main_pos)} positions rebuilt in {time.time() - t0:.0f} s", flush=True)
@@ -228,7 +241,7 @@ def main():
     for mo in modes:
         k = len(sel)
         print(f"behav {mo}: fp32-fq vs eval(bf16) line agreement {agree[mo]}/{k}; line exact: eval {exact_eval[mo]}/{k}, fp32-fq {exact_fq[mo]}/{k}")
-    meta = {"ckpt": a.ckpt, "step": info["step"], "eval_json": a.eval_json, "vocab": a.vocab,
+    meta = {"ckpt": a.ckpt, "step": info["step"], "eval_json": a.eval_json, "vocab": a.vocab, "lang": lang,
             "vocabSha256": hashlib.sha256(open(a.vocab, "rb").read()).hexdigest(), "seed": a.seed,
             "n_logits": len(chosen), "n_behav_positions": len(sel), "modes": modes, "ctx": info["ctx"],
             "max_prefix": info["max_prefix"], "suffix_tokens": info["suffix_tokens"], "max_new": 48,
