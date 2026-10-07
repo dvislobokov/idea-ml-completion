@@ -616,6 +616,12 @@ deleted on Windows while the mapping lives (Java has no explicit unmap) — `NnM
 model update in the IDE would too. Now `NnFormat.mapFiles` (default `false` on Windows, `-Dcompletionml.nn.mmap=false` elsewhere) reads the
 file into a direct buffer instead (31 MB copy, ~20 ms); `write` replaces the target with an atomic `Files.move`. The test covers both paths.
 
+**cs50m** (`cs50m-e3-lr2e3`: go50m preset d640 × 10, 49.8 M params / 39.3 M non-embedding, the lr2e3 recipe, 5.65 G tokens, 62.5 min on both
+GPUs at 1.5 M tok/s): eval ppl 3.60 / FIM 3.77 (31 M: 3.80 / 3.98, −5 %). Standard 3 000 positions: rest of line exact **51.6 %** (31 M 50.2 %),
+≤ 8 tokens 63.5 % (62.6 %), first token 0.832 (0.821), prod ≥ 0.7: 27.4 % shown / 93.2 % exact (27.2 % / 94.4 %); fresh repositories 43.5 %
+(40.9 %). +1.4 / +2.6 p.p. for 1.7× the compute and ~19 MB more in the jar: capacity is not the C# bottleneck, knowledge of the project
+is. Published as `models/cs-nn-50m-e3-lr2e3.cml` (the optional big model); the 31 M stays the default.
+
 **First live run of go-nn-31m-e2 in the Go plugin (0.2.199–0.2.202, reported by the plugin agent) → three engine changes** (`NnCompletion`,
 mirrored in the harness): (1) **word-start healing** — `return le⟨⟩` is a pre-token boundary (the word ends at the caret), so the model
 continued a finished ` le` with `(` (confProd 0.003–0.05) while `len` typed gave `(o.items)` at 0.73; `Options.healMode = WORD_EOL`
