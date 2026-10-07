@@ -640,6 +640,25 @@ No gain (slightly negative on the standard test): the default mix (50 % line-ali
 "no effect" correctly. Working rule from here: data/format hypotheses on the 8.6 M proxy (minutes), winners straight to the 50 M models; the
 31 M models are not retrained further (user decision 2026-10-07).
 
+**C# ranker on real plugin lists (the e18 goal).** The .NET plugin agent built the headless export (`mlDataset`: the plugin's own completion at
+sampled positions, 19 language features in `CSharpMlFeatures` + 13 common, candidate names kept); on the server 16 workers in git worktrees
+(`-Pml.maxFiles=60 -Pml.maxCopy=400 -Pml.names=true`; CodeVision/daemon off and `--no-daemon` were needed, see the task file) exported
+**127 rank-fold repositories, 22 081 lists**, 57 candidates per list, in ~6 h; stopped there by the user (enough for 224 weights).
+Split by repository 4:1 (the plugin's test-fold export did not run): `ml-train l1` 17 411 / 4 670 lists, 10 epochs, seconds.
+
+| order of the list (4 670 test lists) | top-1 | top-5 | MRR |
+|---|---|---|---|
+| plugin rules (`rule_rank_log`) | 0.367 | 0.718 | 0.526 |
+| n-gram e15-a only | 0.176 | 0.313 | 0.253 |
+| most frequent in file | 0.279 | 0.639 | 0.442 |
+| **e18 ranker (224 weights)** | **0.588** | **0.870** | **0.711** |
+
+Per context (MRR): after `.` 0.647, statement start 0.657, argument 0.736, type position 0.723, assignment rhs 0.779, other 0.721. Heaviest
+standardised weights: exact-case prefix match +1.31, `needs_using` (argument) −0.87, keyword at statement start −0.85, upper-case initial in a
+type position +0.78, scope level after `.` −0.70, in vocabulary +0.66 — the same picture as Go e17. Growth with data: 83 repos → 0.743 on a
+smaller test split, 127 → 0.711 on a harder one; the Go ranker reached 0.808 with 300 + 295 repositories. Model: `models/cs-rank-e18.cml`,
+also in `idea-dotnet-support/ml-models/csharp/`; the IDE weigher on the same features is the plugin's next step. Shards: `data/csharp-psi/`.
+
 **First live run of go-nn-31m-e2 in the Go plugin (0.2.199–0.2.202, reported by the plugin agent) → three engine changes** (`NnCompletion`,
 mirrored in the harness): (1) **word-start healing** — `return le⟨⟩` is a pre-token boundary (the word ends at the caret), so the model
 continued a finished ` le` with `(` (confProd 0.003–0.05) while `len` typed gave `(o.items)` at 0.73; `Options.healMode = WORD_EOL`
