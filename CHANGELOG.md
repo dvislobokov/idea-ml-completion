@@ -633,6 +633,13 @@ Published as `models/go-nn-50m-e3-lr2e3.cml` (optional big model; the 31 M stays
 42.8 % vs 40.9 %. The lower perplexity does not turn into more exact lines on the standard test (+1.9 p.p. on fresh code only): C# is not
 data-starved at 31 M; the model is not published. (go50m / cs50m gained more from capacity than from a second pass.)
 
+**Line-FIM** (`--line-rate 0.9 --single-line 0.8`: 90 % of FIM middles end at a line end, 80 % of those span one line — the inference
+situation; `cs31m-e5-line`, 1 epoch): ppl 3.83 / 4.03 (base 3.80 / 3.98), rest of line exact 48.8 % vs 50.2 %, fresh repos 41.5 % vs 40.9 %.
+No gain (slightly negative on the standard test): the default mix (50 % line-aligned, half of them one line) already covers the case.
+**Proxy calibration**: the same pair at 8.6 M (`go5m` preset, 1.5 G tokens, 20 min per run): 40.2 % vs 40.3 % — the proxy predicted
+"no effect" correctly. Working rule from here: data/format hypotheses on the 8.6 M proxy (minutes), winners straight to the 50 M models; the
+31 M models are not retrained further (user decision 2026-10-07).
+
 **First live run of go-nn-31m-e2 in the Go plugin (0.2.199–0.2.202, reported by the plugin agent) → three engine changes** (`NnCompletion`,
 mirrored in the harness): (1) **word-start healing** — `return le⟨⟩` is a pre-token boundary (the word ends at the caret), so the model
 continued a finished ` le` with `(` (confProd 0.003–0.05) while `len` typed gave `(o.items)` at 0.73; `Options.healMode = WORD_EOL`
