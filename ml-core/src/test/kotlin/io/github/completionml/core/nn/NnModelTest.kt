@@ -45,7 +45,17 @@ class NnModelTest {
     }
 
     @Test fun writeReadRoundTrip() {
+        val mapped = NnFormat.mapFiles
+        try {
+            for (map in listOf(true, false)) { NnFormat.mapFiles = map; writeReadRoundTrip(map) }
+        } finally { NnFormat.mapFiles = mapped }
+    }
+
+    /** Writes the same file name twice and re-reads it while the previous model is alive: on Windows this is only possible
+     *  without a mapping (a mapped file cannot be replaced), on other systems both paths must work. */
+    private fun writeReadRoundTrip(mapFiles: Boolean) {
         val dir = Files.createTempDirectory("nnfmt").toFile()
+        val alive = ArrayList<NnFormat.Model>()
         try {
             for (cfg in listOf(tiny, odd)) {
                 val tensors = NnTestModels.random(cfg, 7)
@@ -53,6 +63,7 @@ class NnModelTest {
                 NnFormat.write(f, cfg, mapOf("language" to "go", "corpusId" to "test"), tensors)
                 assertEquals(0L, f.length() % 64)
                 for (m in listOf(NnFormat.read(f), NnFormat.read(f.inputStream(), "stream"))) {
+                    alive += m
                     assertEquals(cfg, m.config)
                     assertEquals("go", m.meta["language"]); assertEquals("nn", m.meta["kind"])
                     assertEquals(tensors.map { it.name }, m.tensors.keys.toList())

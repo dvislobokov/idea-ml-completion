@@ -611,6 +611,11 @@ Fresh code is harder for the small model (50.2 → 40.9 %) than for the teacher 
 generation time, so 7B is the teacher for distillation data and 14B the ceiling reference. The gap grows with the length of the rest (14 vs 43 % at 9+ tokens): multi-token "knowledge" lines. Qwen3.6 (the general model, not a coder
 base) does not do fill-in-the-middle — mostly empty middles — so the Qwen2.5-Coder family stays the teacher candidate (Apache-2.0; outputs usable).
 
+**Fix (Windows, reported by the C# plugin build):** `NnFormat.read(File)` memory-mapped the model, and a mapped file cannot be replaced or
+deleted on Windows while the mapping lives (Java has no explicit unmap) — `NnModelTest.writeReadRoundTrip` failed on the second write and a
+model update in the IDE would too. Now `NnFormat.mapFiles` (default `false` on Windows, `-Dcompletionml.nn.mmap=false` elsewhere) reads the
+file into a direct buffer instead (31 MB copy, ~20 ms); `write` replaces the target with an atomic `Files.move`. The test covers both paths.
+
 **DDP** (`train.py` under `torchrun --nproc_per_node 2`): data groups striped by rank (`PackedStream(rank, world_size)`, unit test
 `test_ddp_striping`), `--tokens-per-step` stays the global batch, rank 0 builds the path-token cache and writes checkpoints carrying every rank's stream
 state (resume only with the same world size), loss all-reduced for logging, eval/metrics on rank 0, `require_backward_grad_sync` once per step.

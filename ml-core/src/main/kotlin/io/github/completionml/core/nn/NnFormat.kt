@@ -6,6 +6,9 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 
 /**
@@ -141,16 +144,38 @@ object NnFormat {
             }
             if (ch.size() < pos) writeFully(ch, ByteBuffer.allocate((pos - ch.size()).toInt()), ch.size())
         }
-        if (!tmp.renameTo(file)) { file.delete(); require(tmp.renameTo(file)) { "cannot rename $tmp to $file" } }
+        try {
+            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------- reading
 
-    /** Memory-maps [file] read-only; int8 weights stay off-heap (page cache), only scales and norms are copied. */
+    private val isWindows = System.getProperty("os.name", "").lowercase().startsWith("windows")
+
+    /** Whether [read] memory-maps the file (default: everywhere but Windows). Tests cover both paths; `-Dcompletionml.nn.mmap=false` forces the copy. */
+    @Volatile var mapFiles: Boolean = !isWindows && System.getProperty("completionml.nn.mmap") != "false"
+
+    /**
+     * Memory-maps [file] read-only; int8 weights stay off-heap (page cache), only scales and norms are copied.
+     * On Windows the file is read into a direct buffer instead: a mapped file there can be neither replaced nor deleted
+     * while the mapping lives (Java has no explicit unmap), which blocks model updates and the write-read round trip.
+     */
     fun read(file: File): Model {
         RandomAccessFile(file, "r").use { raf ->
             val size = raf.length()
             require(size < Int.MAX_VALUE) { "$file: ${size} bytes, > 2 GB is not supported" }
+            if (!mapFiles) {
+                val buf = ByteBuffer.allocateDirect(size.toInt())
+                while (buf.hasRemaining()) {
+                    if (raf.channel.read(buf) < 0) break
+                }
+                require(!buf.hasRemaining()) { "$file: short read" }
+                buf.flip()
+                return parse(buf, file.toString())
+            }
             val buf = raf.channel.map(FileChannel.MapMode.READ_ONLY, 0, size)
             return parse(buf, file.toString())
         }
