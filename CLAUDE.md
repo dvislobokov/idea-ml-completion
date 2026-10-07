@@ -20,10 +20,22 @@ tooling is `ml-train` (Kotlin CLI) plus, for the neural model, PyTorch under `~/
   breaks IDE startup), so the scalar Kotlin path is the production path; no preview APIs in `ml-core`. Design doc: `docs/NEURAL-RU.md`.
 - Nothing leaves the machine except GitHub (this repo is public) — no corpus or model uploads elsewhere.
 
-## This server (161.104.59.19)
-- 32× EPYC 9554, 176 GB RAM, RTX PRO 6000 Blackwell 96 GB (CUDA 13.4), Ubuntu 26.04, JDK 21, Node 22, uv.
-  `/dev/sda1` 400 GB system (Go corpus lives here); `/dev/sdb` 2 TB ext4 at `/mnt/corpus` (C# corpus; fstab by UUID, `noatime`).
-  Both disks are mounted `noatime` — cold reads used to collapse to ~1 MB/s from an atime writeback storm (`tools/server/prepare-disk.sh`).
+## This server (161.104.59.19) — REINSTALLED by the provider on 2026-10-07 (everything on `/` was lost)
+- Now: VM with 32 vCPU, 235 GB RAM, 2 × H200 NVL 143 GB (driver 615.71, CUDA 13.4), Ubuntu 26.04, JDK 21, Node 22, uv, Go 1.27.1
+  (`/usr/local/go`), .NET SDK 10, gh, zig, tmux, nvtop. GPUs: no NVLink bridge, no P2P (VM chipset) — NCCL all_reduce goes through
+  host memory at ~28 GB/s (62 MB of bf16 grads for go31m ≈ 2 ms/step, fine); bf16 matmul 718 TFLOPS per GPU; H2D 53 GB/s.
+  `/dev/sda1` 400 GB system (empty); `/dev/sdb` 2 TB ext4 at `/mnt/corpus` (fstab by UUID, `noatime`) — SURVIVED with the C# corpus
+  (`/mnt/corpus/csharp/repos`, 38 150 repos, 113 GB). Both disks mounted `noatime`.
+- LOST with the system disk (see `docs/MIGRATION-SERVER-RU.md` §1 for what each was): `~/work/ml-data/{catalog,tokenizer,go,csharp/{prepared,bpe16k,models,nn,psi}}`,
+  `~/work/nn/{psi,psi-cs,research,clean/out}`, the Go corpus (`go/repos`, 190 GB), IDEA at `/root/work/idea`, plugin clones.
+  To rebuild: `gh auth login` → `tools/corpus/enumerate.py` (catalogues) → `fetch-catalog.sh go` (~25 min) → `prepare`/`shard`/`train_bpe`/`encode`
+  for both languages; models e14/e15/e17 and the transformers must be retrained; real Go completion lists need IDEA + plugin again.
+- PyTorch: `~/work/nn/.venv` (Python 3.12, torch 2.14.1+cu130, NCCL 2.30, 2-GPU torchrun verified with `~/work/nn/nccltest.py`).
+  `tools/nn/` in the repo is the only copy of the training code now (`~/work/nn` has just the venv and test scripts).
+- GitHub: repo cloned over https; the server's new deploy key `~/.ssh/id_ed25519.pub` must be added to GitHub before pushing
+  (then `git remote set-url origin git@github.com:dvislobokov/idea-ml-completion.git`).
+- Claude Code 2.1.292 via npm; `~/.claude/settings.json` has the proxy env (HTTPS_PROXY to the user's Caddy forward proxy, NO_PROXY,
+  autoupdater off); the OAuth token still has to be added (`claude setup-token`).
 - Run Claude Code inside `tmux` (`tmux new -s ml`, `claude --resume`): without it an SSH drop kills the session and its subagents.
   Subagents: `fable` by default in this project (its quota is separate from sonnet/opus, which hit the weekly limit on 2026-10-06);
   parallel agents in git worktrees. Rebuilding `ml-train` while a run is in flight crashes it (`NoClassDefFoundError`) — copy
