@@ -68,9 +68,9 @@ def main():
         P(f'positions with identifiers {len(wi)}: some identifier only in the context {pct(sum(r["ids_in_ctx_only"]>0 for r in wi), len(wi))}, context needed and sufficient {pct(sum(r["ids_in_ctx_only"]>0 and r["ids_nowhere"]==0 for r in wi), len(wi))}')
     # examples
     random.seed(a.seed)
-    P(''); P(f'{a.examples} raw examples (conf >= 0.5, true line resolves; mixed verdicts):')
+    P(''); P(f'{a.examples} raw examples (conf >= 0.5; wrong+dropped, right+dropped (true line unresolvable too), wrong+kept, right+kept):')
     pool = [r for r in ok if r['conf_prod'] >= 0.5 and r['true_resolvable']]
-    groups = [[r for r in pool if not r['exact'] and not r['gen_resolvable']], [r for r in pool if r['exact'] and not r['gen_resolvable']], [r for r in pool if not r['exact'] and r['gen_resolvable']], [r for r in pool if r['exact'] and r['gen_resolvable']]]
+    groups = [[r for r in pool if not r['exact'] and not r['gen_resolvable']], [r for r in ok if r['conf_prod'] >= 0.5 and r['exact'] and not r['gen_resolvable']], [r for r in pool if not r['exact'] and r['gen_resolvable']], [r for r in pool if r['exact'] and r['gen_resolvable']]]
     want = [3, 3, 2, 2]
     for g, n in zip(groups, want):
         for r in random.sample(g, min(n, len(g))):
