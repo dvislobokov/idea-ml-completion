@@ -5,7 +5,7 @@ import java.util.Random
 
 /**
  * Inference benchmark on random int8 weights (test-scope main; run with plain `java`, classpath from
- * `./gradlew :ml-core:printBenchClasspath`, add `--add-modules jdk.incubator.vector` for the Vector API kernels).
+ * `./gradlew :ml-core:printBenchClasspath`).
  *
  *   NnBenchKt --config S|M|L --threads 8 [--prompt 512] [--gen 20] [--kernels best|scalar] [--dir /tmp/nn] [--runs 10]
  *
@@ -30,7 +30,6 @@ object NnBench {
         val dir = File(opt["dir"] ?: System.getProperty("java.io.tmpdir"))
         val kernels = when (opt["kernels"] ?: "best") {
             "scalar" -> ScalarNnKernels
-            "vector" -> NnKernels.vectorOrNull() ?: error("Vector API kernels unavailable")
             "native-f32" -> io.github.completionml.core.nn.native.NativeNnKernels.loadOrNull(io.github.completionml.core.nn.native.NativeNnKernels.Mode.F32)
                 ?: error("native: ${io.github.completionml.core.nn.native.NativeLib.status}")
             "native-q8" -> io.github.completionml.core.nn.native.NativeNnKernels.loadOrNull(io.github.completionml.core.nn.native.NativeNnKernels.Mode.Q8)

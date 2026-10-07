@@ -175,3 +175,25 @@ if __name__ == "__main__":
     for t in tests:
         t()
     print(f"all {len(tests)} tests passed")
+
+
+def test_ddp_striping():
+    """Ranks of a world of W consume disjoint group sets whose union is every group of the epoch, in rank-striped
+    order; the stream of one rank advances to the next epoch when its own groups are exhausted."""
+    sh, tok = setup()
+    seen = {}
+    for W in (1, 3):
+        for r in range(W):
+            s = stream(io_threads=0, rank=r, world_size=W)
+            s._start_epoch()
+            n = len(s.groups)
+            got = []
+            s.group_docs_of = lambda e, gi, got=got: got.append((e, gi)) or []
+            for _ in range(s._n_own() + 2):      # two past the epoch end
+                s._next_group_docs()
+            own = [gi for e, gi in got if e == 0]
+            assert own == list(range(r, n, W)), (W, r, own[:5])
+            assert [gi for e, gi in got if e == 1] == [r, r + W][:2] and s.epoch == 1
+            seen.setdefault(W, []).extend(own)
+    assert sorted(seen[3]) == seen[1] == list(range(len(seen[1])))
+    print(f"[ddp] {len(seen[1])} groups striped over 3 ranks: union complete, disjoint")

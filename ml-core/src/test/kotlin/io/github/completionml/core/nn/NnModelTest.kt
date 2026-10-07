@@ -18,18 +18,13 @@ class NnModelTest {
 
     // native f32 computes the same numbers as the scalar kernels (summation order aside); native q8 is tested separately
     private fun kernelsUnderTest(): List<NnKernels> =
-        listOfNotNull(ScalarNnKernels, NnKernels.vectorOrNull(), NativeNnKernels.loadOrNull(NativeNnKernels.Mode.F32))
+        listOfNotNull(ScalarNnKernels, NativeNnKernels.loadOrNull(NativeNnKernels.Mode.F32))
 
     private fun assertClose(expected: FloatArray, actual: FloatArray, what: String, tol: Float = 2e-3f) {
         assertEquals(expected.size, actual.size)
         var maxErr = 0f; var maxAbs = 0f
         for (i in expected.indices) { maxErr = maxOf(maxErr, abs(expected[i] - actual[i])); maxAbs = maxOf(maxAbs, abs(expected[i])) }
         assertTrue(maxErr <= tol * maxOf(1f, maxAbs), "$what: max error $maxErr (max |logit| $maxAbs)")
-    }
-
-    @Test fun vectorKernelsDetected() {
-        val expect = System.getProperty("completionml.nn.expectVector") == "true"
-        assertEquals(expect, NnKernels.vectorOrNull() != null, "Vector API kernels available: expected $expect")
     }
 
     @Test fun int8RoundTrip() {

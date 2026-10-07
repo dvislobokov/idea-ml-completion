@@ -559,6 +559,115 @@ class Generator:
             logits = self._fwd(nxt[:, None], (lens + step)[:, None], valid[:, None, None, :], kv)
         return [(gen[b], probs[b], stop_p[b], stop_kind[b], top1_first[b], p_true[b] if p_true else None) for b in range(B)]
 
+    @torch.no_grad()
+    def generate_beam(self, prompts, max_new, beam, true_first=None, constraints=None, rep_guard=False):
+        """Beam search with `beam` hypotheses per prompt; same return tuple as `generate()`. The score is the plain sum of
+        token log-probabilities including the stop token (the MAP line under the model, no length penalty), so
+        `conf_prod` of the result is exp(score). Finished hypotheses win over `limit`/`repeat` ones; repeating
+        branches are pruned (fallback only when nothing else finishes). Step-0 top-1 / p(true first) come from the
+        prefill logits, exactly as in greedy decoding."""
+        dev = self.dev
+        B, K = len(prompts), beam
+        R = B * K
+        tok_len = self.tok.tok_len
+        L = max(len(p) for p in prompts)
+        lens = torch.tensor([len(p) for p in prompts], device=dev)
+        ids = torch.full((B, L), self.tok.pad, dtype=torch.long, device=dev)
+        for b, p in enumerate(prompts):
+            ids[b, L - len(p):] = torch.tensor(p, dtype=torch.long, device=dev)
+        ar = torch.arange(L, device=dev)
+        valid = ar[None, :] >= (L - lens)[:, None]
+        pos = (ar[None, :] - (L - lens)[:, None]).clamp_(min=0)
+        mask = (ar[None, None, :, None] >= ar[None, None, None, :]) & valid[:, None, None, :]
+        mask = mask | torch.eye(L, dtype=torch.bool, device=dev)[None, None]
+        kv = [None] * len(self.m.layers)
+        logits = self._fwd(ids, pos, mask, kv)
+        pr0 = torch.softmax(logits, dim=-1)
+        top1_first = pr0.argmax(dim=-1).tolist()
+        p_true = None
+        if true_first is not None:
+            p_true = pr0[torch.arange(B, device=dev), torch.tensor(true_first, device=dev)].tolist()
+        # expand every prompt to K rows; only slot 0 is live at step 0
+        rep = torch.arange(B, device=dev).repeat_interleave(K)
+        kv = [(k[rep], v[rep]) for k, v in kv]
+        valid = valid[rep]
+        lens_r = lens[rep]
+        logits = logits[rep]
+        stop_cpu = self.stop.cpu().numpy()
+        rem0 = [b""] * B if constraints is None else [c or b"" for c in constraints]
+        live = [[None] * K for _ in range(B)]
+        for b in range(B):
+            live[b][0] = {"ids": [], "probs": [], "score": 0.0, "rem": rem0[b]}
+        fin = [[] for _ in range(B)]       # (score, ids, probs, stop_p, kind)
+        fallback = [[] for _ in range(B)]  # repeat / limit hypotheses
+        done = [False] * B
+        for step in range(max_new + 1):
+            # typed-remainder constraints per live row
+            masked_rows = [(b * K + j) for b in range(B) if not done[b] for j in range(K) if live[b][j] and live[b][j]["rem"]]
+            if masked_rows:
+                m = torch.ones(R, self.tok.vocab_size, dtype=torch.bool, device=dev)
+                for r in masked_rows:
+                    m[r] = self.tok.allowed_mask(live[r // K][r % K]["rem"], dev)
+                logits = logits.masked_fill(~m, float("-inf"))
+            logp = torch.log_softmax(logits, dim=-1)
+            topv, topi = logp.topk(2 * K, dim=-1)
+            topv, topi = topv.tolist(), topi.tolist()
+            parent = [0] * R; nxt_tok = [self.tok.pad] * R
+            new_live = [[None] * K for _ in range(B)]
+            for b in range(B):
+                if done[b]:
+                    continue
+                cands = []
+                for j in range(K):
+                    h = live[b][j]
+                    if h is None:
+                        continue
+                    r = b * K + j
+                    for v, t in zip(topv[r], topi[r]):
+                        if v == float("-inf"):
+                            break
+                        cands.append((h["score"] + v, j, t, math.exp(v)))
+                cands.sort(key=lambda c: -c[0])
+                n_live = 0
+                for score, j, t, p in cands[:K]:
+                    h = live[b][j]
+                    if stop_cpu[t]:
+                        fin[b].append((score, h["ids"], h["probs"], p, "special" if t >= self.tok.special_base else "newline"))
+                        continue
+                    ids_n, probs_n = h["ids"] + [t], h["probs"] + [p]
+                    if rep_guard and repetition(ids_n, tok_len):
+                        fallback[b].append((score, ids_n, probs_n, None, "repeat"))
+                        continue
+                    if step == max_new:
+                        fallback[b].append((score, ids_n, probs_n, None, "limit"))
+                        continue
+                    rem = self.tok.consume(h["rem"], t) if h["rem"] else b""
+                    new_live[b][n_live] = {"ids": ids_n, "probs": probs_n, "score": score, "rem": rem}
+                    parent[b * K + n_live] = b * K + j; nxt_tok[b * K + n_live] = t
+                    n_live += 1
+                if n_live == 0 or (fin[b] and max(fin[b])[0] >= new_live[b][0]["score"]):
+                    done[b] = True
+                    continue
+                for j in range(n_live, K):               # inactive slots: keep a valid parent, feed pad
+                    parent[b * K + j] = parent[b * K]
+            live = new_live
+            if all(done):
+                break
+            idx = torch.tensor(parent, device=dev)
+            kv = [(k[idx], v[idx]) for k, v in kv]
+            valid = torch.cat((valid[idx], torch.ones(R, 1, dtype=torch.bool, device=dev)), dim=1)
+            nxt = torch.tensor(nxt_tok, device=dev)
+            logits = self._fwd(nxt[:, None], (lens_r + step)[:, None], valid[:, None, None, :], kv)
+        out = []
+        for b in range(B):
+            pool = fin[b] or fallback[b]
+            if pool:
+                score, g, probs, stop_p, kind = max(pool, key=lambda h: h[0])
+            else:
+                g, probs, stop_p, kind = [], [], None, "limit"
+            out.append((g, probs, stop_p, kind, top1_first[b], p_true[b] if p_true else None))
+        return out
+
 
 def selftest(model, tok, gen, device):
     """Cached/batched decoding must agree with the model's own full-recompute generate()."""
@@ -796,7 +905,7 @@ def markdown(report):
     row("stopped at newline / hit 48-token limit / repetition stop", "—", lambda s: f"{pct(s['stop_newline'])} / {pct(s['stop_limit'])} / {pct(s['stop_repeat'])} %")
     row("positions healed (typed remainder non-empty)", "—", lambda s: f"{pct(s['healed'])} % (remainder not reproduced: {s['heal_miss']})")
     L.append("")
-    L.append(f"Token healing: `{info.get('heal', 'none')}`; repetition guard: {'on' if info.get('rep_guard') else 'off'}.\n")
+    L.append(f"Token healing: `{info.get('heal', 'none')}`; repetition guard: {'on' if info.get('rep_guard') else 'off'}; decoding: {'beam ' + str(info['beam']) if info.get('beam', 1) > 1 else 'greedy'}.\n")
     for m in modes:
         s = report["modes"][m]["summary"]
         L.append(f"## {m}: show policy (gate conf_prod; shown % / line exact % of shown / useful shown % (its precision %) / mean chars)\n")
@@ -953,6 +1062,7 @@ def main():
                     help="token healing: cut the prompt to the last pre-token boundary and constrain the first token(s) to the typed remainder")
     ap.add_argument("--rep-guard", dest="rep_guard", action="store_true", default=True, help="decode-time repetition guard (default on)")
     ap.add_argument("--no-rep-guard", dest="rep_guard", action="store_false")
+    ap.add_argument("--beam", type=int, default=1, help="beam width (1 = greedy); score = sum of log-probs incl. the stop token")
     ap.add_argument("--typed-extras", dest="typed_extras", action="store_true", default=True,
                     help="extra typed-space / mid-ident positions outside the totals (default on)")
     ap.add_argument("--no-typed-extras", dest="typed_extras", action="store_false")
@@ -997,7 +1107,7 @@ def main():
                            n_positions=len(main_pos), n_in_string=n_extra["in-string"], n_extra=n_extra,
                            n_files=len({p["fi"] for p in main_pos}), stride=a.stride, seed=a.seed, ctx=a.ctx,
                            suffix_tokens=a.suffix_tokens, max_prefix=a.max_prefix, max_new=a.max_new, batch=a.batch, modes=modes,
-                           heal=a.heal, rep_guard=a.rep_guard, typed_extras=a.typed_extras,
+                           heal=a.heal, rep_guard=a.rep_guard, beam=a.beam, typed_extras=a.typed_extras,
                            time_modes_s={}, time_prompts_s=0.0), "ngram_ref": LANG["ngram"], "modes": {}}
     positions_by_mode = {}
     for mode in modes:
@@ -1015,8 +1125,11 @@ def main():
         for k in range(0, len(order), a.batch):
             idx = order[k:k + a.batch]
             tf = [true_first[i] if true_first[i] >= 0 else 0 for i in idx]
-            res = gen.generate([prompts[i] for i in idx], a.max_new, true_first=tf,
-                               constraints=[constraints[i] for i in idx] if heal else None, rep_guard=a.rep_guard)
+            cons = [constraints[i] for i in idx] if heal else None
+            if a.beam > 1:
+                res = gen.generate_beam([prompts[i] for i in idx], a.max_new, a.beam, true_first=tf, constraints=cons, rep_guard=a.rep_guard)
+            else:
+                res = gen.generate([prompts[i] for i in idx], a.max_new, true_first=tf, constraints=cons, rep_guard=a.rep_guard)
             for i, r in zip(idx, res):
                 results[i] = r
             if (k // a.batch) % 50 == 0:

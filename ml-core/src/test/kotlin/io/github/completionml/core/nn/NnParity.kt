@@ -156,7 +156,6 @@ object NnParity {
 
     fun kernelsByName(name: String): NnKernels = when (name) {
         "scalar" -> ScalarNnKernels
-        "vector" -> NnKernels.vectorOrNull() ?: error("Vector API kernels unavailable")
         "native-f32" -> NativeNnKernels.loadOrNull(NativeNnKernels.Mode.F32) ?: error("native: ${NativeLib.status}")
         "native-q8" -> NativeNnKernels.loadOrNull(NativeNnKernels.Mode.Q8) ?: error("native: ${NativeLib.status}")
         else -> error("unknown kernels '$name'")

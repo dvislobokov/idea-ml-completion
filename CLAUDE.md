@@ -100,6 +100,24 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
 - Both runs building `lm.pathtok.u16` at the same time race (os.replace on the .tmp): start the second run a minute later or
   pre-build the cache once.
 
+## State 2026-10-07 afternoon (e18, details in CHANGELOG e18)
+- Data rebuilt for both languages (`tools/server/rebuild-data.sh`); CPU models rebuilt: `go/models/e14-b.cml` (ppl 4.6), `csharp/models/e15-a.cml`
+  (ppl 5.3), proxy rankers `*-rank.cml` (do not transfer to real lists — e17). Go BPE vocabulary retrained (`tokenizer/go-16384.bpe`); the old
+  `go-nn-31m-e1.cml` is incompatible with it and gone anyway.
+- C# recipe: **lr 2e-3, 0.5 M tokens/step** wins (`csharp/models/cs31m-e2-lr2e3.cml`, ppl 3.80, rest of line exact 50.2 %); spm-rate 1.0 = nothing;
+  prefix ≤1024 free, ≤512 −0.8 p.p.; beam 4 (+1 p.p., ×3.6 time, harness only: `eval_inline.py --beam`).
+- DDP works: `torchrun --nproc_per_node 2 train.py …` = 2.45 M tok/s (1.96×), 31 M epoch 47 min. `go31m-e2` (Go baseline, lr2e3 recipe) started
+  13:45 on both GPUs (`go-queue` unit); `go-eval` unit exports + evaluates it afterwards (`go/nn/eval-go31m-e2*`, `fresh-go-*`).
+- Teachers (`tools/nn/eval/eval_hf.py`, HF cache `~/.cache/huggingface/hub`, 180 GB: Qwen2.5-Coder 1.5B/7B/14B/32B, Qwen3.6-35B-A3B): on the
+  fresh-repo C# set (`csharp/prepared/manifest-fresh.jsonl`, repos created ≥2026-05-01, not lm, ≥1000 lines; `tools/nn/eval/fresh_manifest.py`)
+  ours 40.9 %, Qwen2.5-Coder 1.5B 56.1 / 7B 64.1 / 14B 66.7 / 32B 66.3 %; Qwen3.6 cannot FIM (11.8 %). Teacher of choice: 7B (Apache-2.0).
+  Contamination of the standard test fold by the teachers is real; compare teachers only on the fresh sets.
+- Next in the queue (user-approved direction, not yet started): cs50m/go50m with the lr2e3 recipe on DDP; line-aligned FIM middle distribution;
+  PSI as validator / constrained decoding measured on re-exported real Go lists (e17 export has to be redone, ~2 h); sequence-level distillation
+  from Qwen2.5-Coder-7B with Roslyn/gopls-verified outputs; GBDT ranker + nn feature. 4 × H200: only worth it for the distillation-generation day.
+- Uncommitted as of 14:00: CHANGELOG e18, README row, `eval_hf.py`, `fresh_manifest.py`, beam in `eval_inline.py`, DDP in `train.py`/`data.py`
+  (+ `test_ddp_striping`), README notes, this section. The user commits explicitly.
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher

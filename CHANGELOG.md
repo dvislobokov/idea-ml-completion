@@ -540,3 +540,80 @@ rest of line, 80.7 % already occur in the file prefix, 4.8 % come only from the 
 14.5 % from neither (58 % of those are members of a qualifier typed later in the line, 12 % names declared on that line, 9 % calls of
 functions outside the context, 18 % signature parameters / external modules). Expected type is known at 21 % of positions, the
 qualifier's type at 41 % of `.`-positions (+23 % packages; the rest are external modules without a module cache).
+
+## e18 — C# recipe ablations (SPM share, lr 2e-3 / 0.5 M batch), decode-time studies, teacher ceiling with Hugging Face models, DDP
+
+Server reinstalled by the provider on 2026-10-07 (2 × H200): both corpora re-prepared (`tools/server/rebuild-data.sh`; Go 34 229 repos → 4.69 M kept
+files / 5.81 G lexer tokens, lm fold 22 432 repos / 3.93 G; C# 38 150 → 6.06 M / 4.22 G, lm 24 940 / 2.92 G), the Go BPE vocabulary retrained
+(`go-16384.bpe`, sha256 770a316b…; the published C# vocabulary reused), secret-scrubbed BPE shards: Go lm 6.85 G tokens, C# lm 5.65 G.
+
+**CPU models rebuilt** (same recipes; the test folds changed with the stricter generated-code filters, so the numbers are a re-measurement, not a regression):
+
+| model | ppl | top-1 / top-5 | inline ≥ 0.8: shown / right | rest of line ≤ 8 | proxy ranker MRR (LM-only) |
+|---|---|---|---|---|---|
+| Go e14-b (`go/models/e14-b.cml`, 32 MB; e14: 4.1 / 0.521 / 10.0 % / 92.9 % / 35.1 %) | 4.6 | 0.510 / 0.747 | 6.6 % / 90.9 % | 31.7 % | 0.685 (0.496), 221 722 lists |
+| C# e15-a (`csharp/models/e15-a.cml`, 32 MB; e15: 5.9 / 0.484 / 3.1 % / 87.9 % / 31.5 %) | 5.3 | 0.487 / 0.740 | 3.9 % / 89.4 % | 32.7 % | 0.708 (0.527), 9 013 lists; 0.702 on all 235 684 |
+
+**Two C# runs** (go31m preset, scrubbed corpus, fim 0.7, 1 epoch = 5.65 G tokens, one H200 each, ~77–81 min; baseline cs31m-e1 from e16: ppl 3.97,
+rest of line exact 47.9 % healed): `cs31m-e2-spm10` — spm-rate 1.0, lr 1e-3, 1 M tokens/step (5 388 steps); `cs31m-e2-lr2e3` — spm 0.5, **lr 2e-3,
+0.5 M tokens/step** (10 776 steps). Standard whole-line evaluation (`eval_inline.py --lang csharp --positions 3000 --seed 1`, SPM, token healing,
+repetition guard, 2 518 files) plus the free-of-training studies on the same positions:
+
+| run / study | eval ppl plain / FIM | rest of line exact, all | ≤ 8 tokens | first token | prod ≥ 0.8: shown / line exact | prod ≥ 0.9 |
+|---|---|---|---|---|---|---|
+| cs31m-e2-spm10 | 3.98 / 4.39 | 47.7 % | 60.3 % | 0.819 | 17.6 % / 94.3 % | 9.7 % / 97.3 % |
+| … prefix ≤ 1024 tokens (default 1450) | | 48.1 % | 60.5 % | 0.819 | 19.9 % / 94.6 % | 12.1 % / 97.5 % |
+| … prefix ≤ 512 | | 47.7 % | 60.6 % | 0.813 | 20.6 % / 95.0 % | 13.0 % / 97.7 % |
+| … beam 4 | | 49.3 % | 62.2 % | 0.804 | 17.4 % / 96.7 % | 9.6 % / 98.6 % |
+| **cs31m-e2-lr2e3** | **3.80 / 3.98** | **50.2 %** | **62.6 %** | 0.821 | 20.0 % / 97.0 % | 11.2 % / 98.8 % |
+| … prefix ≤ 1024 | | 50.2 % | 62.5 % | 0.822 | 21.7 % / 96.9 % | 13.2 % / 99.0 % |
+| … prefix ≤ 512 | | 49.4 % | 62.2 % | 0.814 | 22.2 % / 97.0 % | 14.2 % / 98.8 % |
+| … beam 4 | | 51.1 % | 63.8 % | 0.807 | 19.8 % / 97.3 % | 11.1 % / 98.8 % |
+
+- SPM-only training changes nothing at inference (47.7 % vs 47.9 %) and loses PSM (FIM ppl 4.39): keep spm 0.5.
+- lr 2e-3 with the 0.5 M batch is the first recipe change that moves the needle: ppl −4 %, +2.5 p.p. line exact, all metrics in the same direction
+  (standard error on 3 000 positions ≈ 0.9 p.p.). Grad norm occasionally hit the 1.0 clip; lr 3e-3 / longer warmup are the next knobs.
+  Exported: `csharp/models/cs31m-e2-lr2e3.cml` (int8 check 3.798 → 3.801), the model to ship for C# until cs50m.
+- Prefix length: 1450 → 1024 tokens costs nothing, → 512 costs < 1 p.p. — the plugin can prefill 30–65 % less.
+- Beam 4 (`eval_inline.py --beam 4`: sum of log-probs incl. the stop token, repeating branches pruned, healing constraints per beam; never returns a
+  finished line with lower probability than greedy): +0.9–1.6 p.p. and +1–2 p.p. precision at ≥ 0.8 for ×3.6 generation time — not for the plugin.
+
+**Teacher ceiling** (`tools/nn/eval/eval_hf.py`: a Hugging Face model on the same sampled positions, lexer and metrics; Qwen PSM prompt
+`<|fim_prefix|><|file_sep|>path\n…<|fim_suffix|>…<|fim_middle|>`, prefix ≤ 6 000 chars, suffix ≤ 2 000, plain healing, confidence = product of the
+greedy probabilities; every added token (`<|fim_pad|>` is not flagged special) ends the middle). Nothing of this ships — it measures the
+distillation headroom.
+
+| 500 standard test positions (seed 1), C# | rest of line exact | ≤ 8 | first token | prod ≥ 0.7: shown / exact |
+|---|---|---|---|---|
+| cs31m-e2-spm10 / cs31m-e2-lr2e3 (ours, 31 M) | 48.0 % / 49.4 % | 62.2 % / 64.0 % | 0.812 / 0.808 | 23.6 % / 93.2 %, 26.6 % / 94.7 % |
+| Qwen2.5-Coder-1.5B | 63.8 % | 74.3 % | 0.874 | 26.2 % / 95.4 % |
+| Qwen2.5-Coder-7B | 68.4 % | 77.3 % | 0.890 | 35.6 % / 94.4 % |
+
+Paired: 7B and lr2e3 both right at 229 positions, 7B only 113, ours only 18. The teachers' errors are the same kind as ours — names declared in other
+files, constants, literals — not syntax. Contamination is real (7B reproduced a `buymeacoffee.com/<user>` URL): split by repository creation date,
+before 2024 ours / 1.5B / 7B = 50.3 / 65.7 / 71.2 % (344 positions), created after 2025-07 = 49.1 / 56.2 / 59.8 % (112 positions).
+
+**Fresh-repository evaluation set** (`<lang>/prepared/manifest-fresh.jsonl`, `tools/nn/eval/fresh_manifest.py <lang> 2026-05-01 1000`): repositories created on/after
+2026-05-01 (after every candidate teacher's release), not in the lm fold, ≥ 1 000 kept lines — C# 264 repos / 61 596 files / 12.2 M lines,
+Go 481 / 129 918 / 31.4 M. 2 000 positions (seed 1) in 1 828 C# files:
+
+| fresh C# positions | rest of line exact | ≤ 8 | first token | rest 1–3 tokens | 4–8 | 9+ |
+|---|---|---|---|---|---|---|
+| cs31m-e2-lr2e3 (ours) | 40.9 % | 52.7 % | 0.797 | 72.7 % | 34.5 % | 14.2 % |
+| Qwen2.5-Coder-1.5B | 56.1 % | 65.6 % | 0.846 | 78.9 % | 53.5 % | 34.5 % |
+| Qwen2.5-Coder-7B | 64.1 % | 73.6 % | 0.887 | 85.7 % | 62.5 % | 42.8 % |
+| Qwen2.5-Coder-14B | 66.7 % | 75.4 % | 0.894 | 84.5 % | 67.2 % | 46.9 % |
+| Qwen2.5-Coder-32B | 66.3 % | 74.5 % | 0.887 | 83.9 % | 65.9 % | 47.9 % |
+| Qwen3.6-35B-A3B (instruct, FIM tokens in the vocabulary) | 11.8 % | 12.0 % | 0.236 | — | — | — |
+
+Fresh code is harder for the small model (50.2 → 40.9 %) than for the teacher (68.4 → 64.1 %); paired 7B / ours: both 760, 7B only 523, ours only
+59 (1.5B: 381 / 78; 14B: 570 / 55; 32B: 576 / 68). Above 7B the teachers saturate (14B 66.7 %, 32B 66.3 %, 0.5 p.p. apart) at 1.5–2.7× the
+generation time, so 7B is the teacher for distillation data and 14B the ceiling reference. The gap grows with the length of the rest (14 vs 43 % at 9+ tokens): multi-token "knowledge" lines. Qwen3.6 (the general model, not a coder
+base) does not do fill-in-the-middle — mostly empty middles — so the Qwen2.5-Coder family stays the teacher candidate (Apache-2.0; outputs usable).
+
+**DDP** (`train.py` under `torchrun --nproc_per_node 2`): data groups striped by rank (`PackedStream(rank, world_size)`, unit test
+`test_ddp_striping`), `--tokens-per-step` stays the global batch, rank 0 builds the path-token cache and writes checkpoints carrying every rank's stream
+state (resume only with the same world size), loss all-reduced for logging, eval/metrics on rank 0, `require_backward_grad_sync` once per step.
+Smoke on the C# shards (6 min + 3 min resume): resume continues exactly (step 399 → 591, loss continuous); throughput while both GPUs were shared with the
+teacher evaluations 1.3 M tok/s; clean measurement on idle GPUs **2.45 M tok/s** (1.96× one GPU at 1.25 M; 428 ms per 1 M-token step), so a
+31 M epoch takes 47 min instead of 77. The Go baseline `go31m-e2` (scrubbed corpus, fim 0.7, lr 2e-3 / 0.5 M) runs on both GPUs with it.

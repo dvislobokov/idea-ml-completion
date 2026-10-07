@@ -35,7 +35,7 @@
 - **JBR не содержит Vector API.** Проверено 2026-10-06 на IntelliJ 2026.x / JBR 25.0.3 (macOS): `jbr/bin/java --list-modules`
   не содержит `jdk.incubator.vector` (вообще ни одного инкубаторного модуля); `--add-modules=jdk.incubator.vector` в vmoptions
   **ломает запуск IDE**. Следствие: **production-путь инференса — скалярный Kotlin** с авто-векторизацией C2 и многопоточностью;
-  Vector API остаётся в бенчмарке как сравнение. Побочный урок: строка vmoptions с пробелом (`--add-modules jdk.incubator.vector`)
+  Vector API из `ml-core` удалён 2026-10-07 (остались scalar и наши нативные ядра). Побочный урок: строка vmoptions с пробелом (`--add-modules jdk.incubator.vector`)
   молча игнорируется — одна строка = один аргумент JVM.
 - **Ничего не требовать от пользователя**: ни vmoptions, ни установки рантаймов. Опционально плагин может предложить
   правку vmoptions через `com.intellij.diagnostic.VMOptions` (как «Change Memory Settings»), но работать должен и без неё.

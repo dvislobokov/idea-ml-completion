@@ -280,15 +280,16 @@ class PackedStream:
 
     def __init__(self, sh: Shards, tok: Tokenizer, seq_len=2048, seed=1, fim_rate=0.5, spm_rate=0.5, line_rate=0.5,
                  t_min=2_000_000, group_tokens=None, with_path=True, max_file_tokens=0, epoch=0, name="train",
-                 io_threads=4, lookahead=128):
+                 io_threads=4, lookahead=128, rank=0, world_size=1):
         self.sh, self.tok, self.seq_len, self.seed = sh, tok, seq_len, seed
+        self.rank, self.world_size = rank, world_size   # DDP: rank r consumes groups r, r+W, r+2W, ... of every epoch
         self.fim_rate, self.spm_rate, self.line_rate, self.t_min = fim_rate, spm_rate, line_rate, t_min
         self.group_tokens = group_tokens or 2 * seq_len
         self.with_path = with_path
         self.max_file_tokens = max_file_tokens
         self.name = name
         self.epoch = epoch
-        self.cursor = 0           # next group index to *consume*
+        self.cursor = 0           # next *own* group to consume (group index = cursor * world_size + rank)
         self.queue = deque()      # documents fetched from groups < cursor and not yet emitted
         self.windows = 0
         self.tokens_seen = 0
@@ -394,17 +395,24 @@ class PackedStream:
 
     # ---------------------------------------------------------------- windows
 
+    def _n_own(self):
+        """Groups of the current epoch that belong to this rank."""
+        return len(range(self.rank, len(self.groups), self.world_size))
+
+    def _gi(self, own_index):
+        return own_index * self.world_size + self.rank
+
     def _next_group_docs(self):
         if self.groups is None:
             self._start_epoch()
-        while self.cursor >= len(self.groups):
+        while self.cursor >= self._n_own():
             self.epoch += 1
             self._start_epoch()
         if self._pool is None:
-            docs = self.group_docs_of(self.epoch, self.cursor)
+            docs = self.group_docs_of(self.epoch, self._gi(self.cursor))
         else:
-            while self._submitted < min(len(self.groups), self.cursor + self._lookahead):
-                self._pending.append(self._pool.submit(self.group_docs_of, self.epoch, self._submitted))
+            while self._submitted < min(self._n_own(), self.cursor + self._lookahead):
+                self._pending.append(self._pool.submit(self.group_docs_of, self.epoch, self._gi(self._submitted)))
                 self._submitted += 1
             docs = self._pending.popleft().result()
         self.cursor += 1

@@ -1,4 +1,6 @@
-"""Train the code LM on the BPE shards. Single GPU, bf16 autocast, AdamW, cosine LR with warmup, grad accumulation.
+"""Train the code LM on the BPE shards. bf16 autocast, AdamW, cosine LR with warmup, grad accumulation; one GPU, or
+several with `torchrun --nproc_per_node N train.py ...` (DDP: data groups striped by rank, --tokens-per-step is the global batch,
+checkpoints from rank 0 carry every rank's stream state, so a run resumes only with the same world size).
 
 Example (smoke):  python train.py --preset go31m --run smoke-go30 --tokens-per-step 524288 --micro-batch 32 \
                       --max-minutes 15 --eval-every 200 --ckpt-every 200 --compile
@@ -6,6 +8,7 @@ Checkpoints: <out>/<run>/ckpt-latest.pt (+ ckpt-<step>.pt every --keep-every), m
 config in <out>/<run>/config.json. Re-running with the same --run resumes from ckpt-latest.pt unless --no-resume.
 """
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -14,12 +17,21 @@ import time
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import CodeLM, ModelConfig, PRESETS, preset  # noqa: E402
 import data as D  # noqa: E402
 
 DEFAULT_OUT = os.path.expanduser("~/work/ml-data/go/nn")
+RANK = int(os.environ.get("RANK", "0"))
+WORLD = int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def say(*args, **kw):
+    """print from rank 0 only"""
+    if RANK == 0:
+        print(*args, flush=True)
 
 
 def parse():
@@ -107,8 +119,15 @@ def save_ckpt(path, raw_model, opt, step, tokens, stream_state, a, cfg):
 def main():
     a = parse()
     torch.manual_seed(a.seed)
-    device = "cuda"
     assert torch.cuda.is_available()
+    ddp = WORLD > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    torch.cuda.set_device(local_rank)
+    device = "cuda"
+    main_proc = RANK == 0
+    if ddp:
+        dist.init_process_group("nccl", device_id=torch.device("cuda", local_rank))
+        say(f"DDP: {WORLD} ranks (NCCL {torch.cuda.nccl.version()})")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     run_dir = os.path.join(a.out, a.run)
@@ -119,30 +138,41 @@ def main():
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False) if resume else None
     if ck:
         cfg = ModelConfig.from_dict(ck["config"])
-    json.dump({"config": cfg.to_dict(), "args": vars(a)}, open(os.path.join(run_dir, "config.json"), "w"), indent=1)
+    if main_proc:
+        json.dump({"config": cfg.to_dict(), "args": vars(a), "world_size": WORLD}, open(os.path.join(run_dir, "config.json"), "w"), indent=1)
 
     tokens_per_micro = a.micro_batch * a.seq_len
-    accum = max(1, round(a.tokens_per_step / tokens_per_micro))
-    tokens_per_step = accum * tokens_per_micro
-    print(f"run {a.run}: {cfg.name} {cfg.param_count():,} params ({cfg.non_embedding_params():,} non-emb); "
-          f"micro-batch {a.micro_batch} x {a.seq_len} x accum {accum} = {tokens_per_step:,} tokens/step", flush=True)
+    accum = max(1, round(a.tokens_per_step / (tokens_per_micro * WORLD)))
+    tokens_per_step = accum * tokens_per_micro * WORLD
+    say(f"run {a.run}: {cfg.name} {cfg.param_count():,} params ({cfg.non_embedding_params():,} non-emb); "
+          f"micro-batch {a.micro_batch} x {a.seq_len} x accum {accum} x {WORLD} ranks = {tokens_per_step:,} tokens/step", flush=True)
 
     # ---------------------------------------------------------------- data
     tok = D.Tokenizer(a.vocab)
     assert tok.vocab_size == cfg.vocab_size, (tok.vocab_size, cfg.vocab_size)
     train_sh = D.Shards(a.data, a.train_fold)
-    if not a.no_warm_cache:
+    if not a.no_warm_cache and main_proc:
         D.warm_page_cache(train_sh.tokens_path)
+    if ddp and not main_proc:
+        dist.barrier()          # rank 0 builds the path-token cache (<fold>.pathtok.u16) first; the others reuse it
     stream = D.PackedStream(train_sh, tok, seq_len=a.seq_len, seed=a.seed, fim_rate=a.fim_rate, spm_rate=a.spm_rate,
                             t_min=a.t_min, with_path=not a.no_path, max_file_tokens=a.max_file_tokens,
-                            io_threads=a.io_threads)
+                            io_threads=a.io_threads, rank=RANK, world_size=WORLD, name=f"train/{RANK}" if ddp else "train")
     if ck:
-        stream.load_state_dict(ck["stream"])
+        st = ck["stream"]
+        if isinstance(st, list):
+            assert len(st) == WORLD, f"checkpoint was written by {len(st)} ranks, running with {WORLD}"
+            st = st[RANK]
+        else:
+            assert WORLD == 1, "single-GPU checkpoint cannot be resumed under DDP (stream state is per rank)"
+        stream.load_state_dict(st)
     eval_sh = D.Shards(a.data, a.eval_fold)
     t0 = time.time()
     ev_plain = D.eval_windows(eval_sh, tok, a.eval_windows, a.seq_len, fim=False, with_path=not a.no_path)
     ev_fim = D.eval_windows(eval_sh, tok, a.eval_windows, a.seq_len, fim=True, with_path=not a.no_path)
-    print(f"eval set: {a.eval_windows} plain + {a.eval_windows} FIM windows from '{a.eval_fold}' ({time.time()-t0:.1f}s)", flush=True)
+    if ddp and main_proc:
+        dist.barrier()          # the eval fold's path-token cache is built above too: keep it in the rank-0-first section
+    say(f"eval set: {a.eval_windows} plain + {a.eval_windows} FIM windows from '{a.eval_fold}' ({time.time()-t0:.1f}s)", flush=True)
 
     # ---------------------------------------------------------------- model / optimiser
     model = CodeLM(cfg).to(device)
@@ -156,9 +186,20 @@ def main():
     step = ck["step"] if ck else 0
     tokens = ck["tokens"] if ck else 0
     if ck:
-        print(f"resumed from {ckpt_path}: step {step}, {tokens:,} tokens, stream epoch {stream.epoch} cursor {stream.cursor}", flush=True)
+        say(f"resumed from {ckpt_path}: step {step}, {tokens:,} tokens, stream epoch {stream.epoch} cursor {stream.cursor}", flush=True)
     raw_model = model
     fwd = torch.compile(model) if a.compile else model
+    if ddp:   # DDP around the compiled module (nanoGPT pattern); rope buffers are constant, no buffer broadcast
+        fwd = torch.nn.parallel.DistributedDataParallel(fwd, device_ids=[local_rank], broadcast_buffers=False)
+    eval_model = raw_model if ddp else fwd
+
+    def gather_stream(st):
+        """stream state of every rank (list) for the checkpoint; a plain dict on one GPU"""
+        if not ddp:
+            return st
+        objs = [None] * WORLD
+        dist.all_gather_object(objs, st)
+        return objs
 
     if a.max_steps:
         total_steps = a.max_steps
@@ -166,12 +207,14 @@ def main():
         total_steps = int(a.max_tokens // tokens_per_step)
     else:
         total_steps = 10 ** 9  # time-limited: constant LR after warmup
-    print(f"schedule: warmup {a.warmup}, total steps {total_steps if total_steps < 10**9 else 'open'}, "
+    say(f"schedule: warmup {a.warmup}, total steps {total_steps if total_steps < 10**9 else 'open'}, "
           f"lr {a.lr} -> {a.lr*a.min_lr_ratio}", flush=True)
 
-    log = open(os.path.join(run_dir, "metrics.jsonl"), "a")
+    log = open(os.path.join(run_dir, "metrics.jsonl"), "a") if main_proc else None
 
     def write(rec):
+        if log is None:
+            return
         rec["time"] = time.time()
         log.write(json.dumps(rec) + "\n"); log.flush()
 
@@ -189,8 +232,12 @@ def main():
         while True:
             if step >= total_steps:
                 stop_reason = "max steps"; break
-            if deadline and time.time() > deadline:
-                stop_reason = "time limit"; break
+            if deadline:
+                stop_t = torch.tensor([time.time() > deadline], device=device)
+                if ddp:
+                    dist.broadcast(stop_t, 0)     # every rank stops on the same step
+                if stop_t.item():
+                    stop_reason = "time limit"; break
             lr = lr_at(step, a, total_steps)
             for g in opt.param_groups:
                 g["lr"] = lr
@@ -198,6 +245,8 @@ def main():
             loss_sum = 0.0
             for k in range(accum):
                 x, y, stream_state = pf.next(device)
+                if ddp:
+                    fwd.require_backward_grad_sync = (k == accum - 1)   # all-reduce once per step
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     _, loss = fwd(x, y)
                 (loss / accum).backward()
@@ -208,7 +257,10 @@ def main():
             step += 1
             tokens += tokens_per_step
             toks_since_log += tokens_per_step
-            loss_val = (loss_sum / accum).item()   # sync point once per step
+            loss_t = loss_sum / accum
+            if ddp:
+                dist.all_reduce(loss_t, op=dist.ReduceOp.AVG)
+            loss_val = loss_t.item()   # sync point once per step
             loss_acc += loss_val
             step_time = time.time() - ts
             if step % a.log_every == 0 or step == 1:
@@ -220,33 +272,40 @@ def main():
                        "gpu_reserved_gb": torch.cuda.max_memory_reserved() / 1e9,
                        "epoch": stream_state["epoch"], "elapsed": now - start}
                 write(rec)
-                print(f"step {step:6d} | loss {rec['loss']:.4f} | lr {lr:.2e} | gn {float(gn):.2f} | "
+                say(f"step {step:6d} | loss {rec['loss']:.4f} | lr {lr:.2e} | gn {float(gn):.2f} | "
                       f"{step_time*1000:.0f} ms/step | {tps/1e3:.0f}k tok/s | mem {rec['gpu_mem_gb']:.1f} GB | "
                       f"{tokens/1e9:.3f} G tokens", flush=True)
                 last_log = now; toks_since_log = 0; loss_acc = 0.0
-            if a.eval_every and step % a.eval_every == 0:
+            if a.eval_every and step % a.eval_every == 0 and main_proc:
                 te = time.time()
-                lp = evaluate(fwd, ev_plain, a.micro_batch, device)
-                lf = evaluate(fwd, ev_fim, a.micro_batch, device)
+                lp = evaluate(eval_model, ev_plain, a.micro_batch, device)
+                lf = evaluate(eval_model, ev_fim, a.micro_batch, device)
                 write({"step": step, "tokens": tokens, "eval_loss": lp, "eval_ppl": math.exp(lp),
                        "eval_fim_loss": lf, "eval_fim_ppl": math.exp(lf), "eval_time": time.time() - te})
-                print(f"  eval @ {step}: plain loss {lp:.4f} ppl {math.exp(lp):.2f} | FIM loss {lf:.4f} ppl {math.exp(lf):.2f} "
+                say(f"  eval @ {step}: plain loss {lp:.4f} ppl {math.exp(lp):.2f} | FIM loss {lf:.4f} ppl {math.exp(lf):.2f} "
                       f"({time.time()-te:.1f}s)", flush=True)
             if a.ckpt_every and step % a.ckpt_every == 0:
-                save_ckpt(ckpt_path, raw_model, opt, step, tokens, stream_state, a, cfg)
-                if a.keep_every and step % a.keep_every == 0:
-                    save_ckpt(os.path.join(run_dir, f"ckpt-{step}.pt"), raw_model, opt, step, tokens, stream_state, a, cfg)
-                print(f"  checkpoint @ {step}", flush=True)
+                st_all = gather_stream(stream_state)
+                if main_proc:
+                    save_ckpt(ckpt_path, raw_model, opt, step, tokens, st_all, a, cfg)
+                    if a.keep_every and step % a.keep_every == 0:
+                        save_ckpt(os.path.join(run_dir, f"ckpt-{step}.pt"), raw_model, opt, step, tokens, st_all, a, cfg)
+                say(f"  checkpoint @ {step}", flush=True)
     except KeyboardInterrupt:
         stop_reason = "interrupted"
     pf.close()
-    print(f"stopping ({stop_reason}) at step {step}, {tokens:,} tokens, {(time.time()-start)/60:.1f} min", flush=True)
-    save_ckpt(ckpt_path, raw_model, opt, step, tokens, stream_state, a, cfg)
-    lp = evaluate(fwd, ev_plain, a.micro_batch, device)
-    lf = evaluate(fwd, ev_fim, a.micro_batch, device)
-    write({"step": step, "tokens": tokens, "eval_loss": lp, "eval_ppl": math.exp(lp), "eval_fim_loss": lf,
-           "eval_fim_ppl": math.exp(lf), "final": True, "stop": stop_reason})
-    print(f"final eval @ {step}: plain loss {lp:.4f} ppl {math.exp(lp):.2f} | FIM loss {lf:.4f} ppl {math.exp(lf):.2f}", flush=True)
+    say(f"stopping ({stop_reason}) at step {step}, {tokens:,} tokens, {(time.time()-start)/60:.1f} min", flush=True)
+    st_all = gather_stream(stream_state)
+    if main_proc:
+        save_ckpt(ckpt_path, raw_model, opt, step, tokens, st_all, a, cfg)
+        lp = evaluate(eval_model, ev_plain, a.micro_batch, device)
+        lf = evaluate(eval_model, ev_fim, a.micro_batch, device)
+        write({"step": step, "tokens": tokens, "eval_loss": lp, "eval_ppl": math.exp(lp), "eval_fim_loss": lf,
+               "eval_fim_ppl": math.exp(lf), "final": True, "stop": stop_reason})
+        say(f"final eval @ {step}: plain loss {lp:.4f} ppl {math.exp(lp):.2f} | FIM loss {lf:.4f} ppl {math.exp(lf):.2f}", flush=True)
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

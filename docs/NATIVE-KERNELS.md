@@ -124,7 +124,7 @@ The gcc and zig (clang 19) builds of the Linux library measure the same (f32 51 
    self-test mismatch) → `NativeLib.status` holds the reason and `NnKernels.best()` returns the Kotlin kernels.
 3. `-Dcompletionml.nn.native.path=/abs/lib.so` loads a given file instead (benchmarks, debugging).
 
-`NnKernels.best()` order: native → Vector API (only outside JBR) → scalar. One `NativeNnKernels` instance per model
+`NnKernels.best()` order: native → scalar (the Vector API source set was removed on 2026-10-07: JBR has no `jdk.incubator.vector`). One `NativeNnKernels` instance per model
 (owns scratch and the prepared/packed weights; freed by `NnModel.close()`). `NnSession` is `AutoCloseable` now (native KV
 cache; a `Cleaner` frees it if forgotten).
 

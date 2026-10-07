@@ -5,9 +5,9 @@ package io.github.completionml.core.nn
  * they live off-heap, so kernels copy row tiles into a per-worker heap `tile` (bulk ByteBuffer.get, ~memcpy speed)
  * and compute from there.
  *
- * Two implementations: [ScalarNnKernels] (plain loops shaped for C2 auto-vectorisation — this is what runs inside an
- * IDE with default VM options) and `vector.VectorNnKernels` (jdk.incubator.vector, compiled in a separate source set
- * and loaded reflectively only when the module is present, see [NnKernels.best]).
+ * Two implementations: [ScalarNnKernels] (plain loops shaped for C2 auto-vectorisation — the fallback that runs in any
+ * JVM) and the native SIMD library (`nn.native.NativeNnKernels`, our own C kernels shipped in the jar, see [NnKernels.best]).
+ * No jdk.incubator.vector: the JetBrains Runtime does not ship it and nothing may be required from the user.
  */
 interface NnKernels {
     val name: String
@@ -40,29 +40,16 @@ interface NnKernels {
         const val FROWS = 32
         /** Tokens per accumulator group in the scalar prefill kernel. */
         const val TOK_GROUP = 64
-        const val VECTOR_CLASS = "io.github.completionml.core.nn.vector.VectorNnKernels"
-
         /**
          * Preference: the native SIMD library (`nn.native.NativeNnKernels`, if it loads and passes its self-test;
-         * `-Dcompletionml.nn.native=false` disables it), then the Vector API kernels when `jdk.incubator.vector` is
-         * resolvable in this VM (`--add-modules`), then the plain kernels. `-Dcompletionml.nn.vector=false` skips the
-         * Vector API. A native instance owns scratch memory: one per model, closed with it.
+         * `-Dcompletionml.nn.native=false` disables it), then the plain kernels. A native instance owns scratch memory:
+         * one per model, closed with it.
          */
-        fun best(): NnKernels = nativeOrNull() ?: vectorOrNull() ?: ScalarNnKernels
+        fun best(): NnKernels = nativeOrNull() ?: ScalarNnKernels
 
         fun nativeOrNull(): NnKernels? = try {
             io.github.completionml.core.nn.native.NativeNnKernels.loadOrNull()
         } catch (_: Throwable) { null }
-
-        fun vectorOrNull(): NnKernels? {
-            if (System.getProperty("completionml.nn.vector") == "false") return null
-            return try {
-                Class.forName("jdk.incubator.vector.FloatVector")
-                Class.forName(VECTOR_CLASS).getDeclaredConstructor().newInstance() as NnKernels
-            } catch (_: Throwable) {
-                null
-            }
-        }
     }
 }
 

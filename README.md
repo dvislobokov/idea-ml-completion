@@ -35,7 +35,6 @@ ml-core/        pure Kotlin, embedded into the plugins (stdlib only, JDK 21, no 
                 nn/         transformer inference: CMLN model format (int8, mmap), KV cache, scalar kernels,
                             nn/native: JNI loader for the SIMD kernels with scalar fallback
                 format/     .cml container
-ml-core/src/vector/   Vector API kernels — benchmark reference only (JBR does not ship jdk.incubator.vector)
 native/         C11 SIMD kernels (AVX2 / AVX-512 (VNNI) / NEON), self-test, benchmark, cross-compiled with zig
 ml-train/       Kotlin CLI: prepare, shard, l2 (LM), l1 (ranker), eval-lm, eval-rank, eval-inline, tokens, bench-nn
 tools/nn/       Python (PyTorch) — training side only: tokenizer/ (BPE trainer, corpus encoder), train/ (model, data,
@@ -52,7 +51,6 @@ JDK 21, Gradle wrapper, Kotlin 2.3.
 
 ```sh
 ./gradlew :ml-core:test :ml-train:test :ml-train:installDist -q   # CLI at ml-train/build/install/ml-train/bin/ml-train
-./gradlew :ml-core:vectorTest                                      # same nn tests with --add-modules jdk.incubator.vector
 make -C native test                                                # C self-test + benchmark; `make cross` builds all 4 platforms (zig)
 ```
 
@@ -94,6 +92,7 @@ cd ../clean      && python -I encode_corpus_clean.py --vocab ../../../../ml-data
 cd ../train      && python -I train.py --preset go31m --run go31m-e1 --max-tokens 6.8e9 --compile ...   # see train/README.md
                     python -I export.py --ckpt .../ckpt-latest.pt --out ../../../../ml-data/go/models/go-nn-31m.cml --check 128
 cd ../eval       && python -I eval_inline.py --ckpt .../ckpt-latest.pt --positions 3000 --modes plain,fim,spm --dump 60
+                    # studies without retraining: --max-prefix 512|1024, --beam 4 (sum of log-probs incl. the stop token)
 ```
 
 Folds are assigned by the md5 of the repository name (first `--test` repositories → test, every third of the rest → rank,
@@ -123,6 +122,7 @@ per-file cache LM (λ=0.3), LM / ranker / test on disjoint repository folds, 300
 | e15 full C# corpus (24 945 repos, 2.95 G tokens), stricter generated-code filters | order 5, 32 MB: ppl 5.9, top-1 0.484 (52 MB: 5.6 / 0.490; 24 MB: 6.1 / 0.483); inline at 0.8: 3 % shown, 88 % right; proxy ranker MRR 0.756 (e12: 0.712) |
 | **e16 own transformer go31m** (d512 × 8, 31 M, BPE 16k, FIM, 6.8 G tokens, 2.5 h on one GPU) | Go: ppl 2.13 (BPE); whole-line suggestions at 95 % precision shown in 32 % of positions (n-gram: 10 %), rest of line exact 66 % vs 35 %; int8 export lossless; Kotlin inference reproduces PyTorch 1000/1000 lines; native kernels ×3.2; with token healing at the cursor (`NnCompletion`) rest of line exact 62 % / 73 % (≤ 8 tokens). **cs31m** (C#, 5.65 G tokens, secret-scrubbed): ppl 3.97; shown 18 % at 92 % (n-gram 3 % at 88 %), rest of line exact 49 % vs 32 % (60 % with token healing) |
 | e17 ranker on real Go completion lists, corpus scale (300 rank + 295 test repos, 120 k + 84 k lists) | test fold: MRR 0.808 vs plugin rules 0.527 vs proxy ranker 0.518 (top-1 0.710 / 0.388 / 0.390, top-5 0.934 / 0.685 / 0.666); PSI context adds only 4.8 % of rest-of-line identifiers beyond the file prefix |
+| e18 C# recipe ablations (spm 1.0, **lr 2e-3 / 0.5 M batch**), prefix/beam studies, teacher ceiling (Qwen2.5-Coder via `eval_hf.py`), fresh-repository eval set, DDP | C#: lr 2e-3 → ppl 3.80 (3.97), rest of line exact 50.2 % (47.9 %); prefix 1024 free, 512 −0.8 p.p.; beam 4 +1 p.p. for ×3.6 time; teachers on the same positions: Qwen2.5-Coder-1.5B 63.8 %, 7B 68.4 % (ours 49.4 %), on repos created after 2026-05: 7B 64.1 % vs ours 40.9 %; Qwen3.6 does not do FIM (11.8 %); CPU models rebuilt (Go e14-b ppl 4.6, C# e15-a 5.3 on the new test folds) |
 
 Earlier prototype and scaling tables: `docs/EARLY-RESULTS.md`.
 

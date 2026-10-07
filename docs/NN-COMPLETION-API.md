@@ -11,7 +11,7 @@ Measured effect and numbers: `~/work/ml-data/go/nn/eval-heal.md`, docs/NEURAL-RU
 |---|---|---|
 | `BpeTokenizer` (`core.bpe`) | byte-level BPE, twin of `cmlbpe.py`; `encodeBytes`, `decodeBytes`, **`preTokenBoundaries` / `lastPreTokenBoundary`** (pre-token scanner exposed for healing) | one per vocabulary, shared, thread-safe |
 | `NnFormat.read(file)` → `NnFormat.Model` | mmap of the `.cml` weights (18–23 ms for 31 MB) | one per model file |
-| `NnModel(weights, nThreads, kernels)` | the network; `NnKernels.best()` picks native q8 → Vector API → scalar | one per decoding thread (its executor is not reentrant) |
+| `NnModel(weights, nThreads, kernels)` | the network; `NnKernels.best()` picks native q8 → scalar | one per decoding thread (its executor is not reentrant) |
 | `NnSession` (`model.newSession(capacity)`) | KV cache with prefix reuse: `prefill` recomputes only after the longest common prefix with the previous prompt | one per editor/thread; `close()` frees native memory |
 | `VocabPrefixIndex(tok)` | sorted byte-prefix table over the vocabulary (`allowed(remainder)`, `consume`) — built once by `NnCompletion` | one per vocabulary |
 | **`NnCompletion(model, tok, options)`** | the entry point: `complete(path, before, after, session): Result` | one per (model, options); immutable |

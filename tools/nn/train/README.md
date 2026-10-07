@@ -84,6 +84,12 @@ systemd-run --unit=nn-go31m --collect -p WorkingDirectory=$HOME/work/nn/train ba
   "$PY train.py --preset go31m --run go31m-e1 --micro-batch 32 --tokens-per-step 1048576 --lr 1e-3 --warmup 500 \
    --max-tokens 6.8e9 --eval-every 500 --ckpt-every 500 --keep-every 5000 --compile > ~/work/ml-data/go/nn/go31m-e1.log 2>&1"
 
+# 3b. the same run on two GPUs (DDP via torchrun): --tokens-per-step stays the GLOBAL batch (accum is split over the ranks),
+#     rank r consumes data groups r, r+W, ... of every epoch, rank 0 writes the checkpoint with every rank's stream state
+#     (so a DDP run resumes only with the same --nproc_per_node); metrics/eval/log from rank 0 only.
+systemd-run --unit=nn-go31m --collect -p WorkingDirectory=$HOME/work/nn/train bash -c \
+  "$PY -m torch.distributed.run --nproc_per_node 2 train.py --preset go31m --run go31m-e2 ... --compile > ~/work/ml-data/go/nn/go31m-e2.log 2>&1"
+
 # 4. export + int8 check, then sanity samples
 $PY export.py --ckpt ~/work/ml-data/go/nn/go31m-e1/ckpt-latest.pt --out ~/work/ml-data/go/models/go-nn-31m.cml --check 64
 $PY sample.py --ckpt ~/work/ml-data/go/nn/go31m-e1/ckpt-latest.pt --snippets 3
