@@ -19,6 +19,7 @@ plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 12, "axes.edgeco
 def save(fig, name):
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, name), format="svg")
+    if os.environ.get("CHART_PNG"): fig.savefig(os.path.join(os.environ["CHART_PNG"], name[:-4] + ".png"), dpi=80)
     plt.close(fig)
 
 def bars(ax, labels, series, colors, names, fmt="{:.1f}", width=None, ylabel=None, ylim=None):
@@ -154,7 +155,7 @@ for name, ((tr, ev), c, ls) in data.items():
     y = smooth(tr[:, 1]); x = tr[len(tr) - len(y):, 0] / 1e9
     ax.plot(x, y, color=c, linestyle=ls, linewidth=2, label=name)
 ax.set_xlabel("токенов, млрд"); ax.set_ylabel("train loss (скользящее среднее 25 шагов)"); ax.set_ylim(0.9, 2.2); ax.legend(frameon=False)
-ax.set_title("Кривые обучения (metrics.jsonl): Go учится легче C#; 50 M ниже 31 M на том же корпусе", loc="left", color=INK)
+ax.set_title("Кривые обучения (metrics.jsonl): Go учится легче C#; 50 M ниже 31 M", loc="left", color=INK)
 save(fig, "loss_curves.svg")
 
 fig, ax = plt.subplots(figsize=(10, 4.8))
@@ -244,7 +245,7 @@ ax.barh(y, both, color=AQUA, label="обе верны"); ax.barh(y, only_t, left
 ax.barh(y, only_o, left=np.array(both) + np.array(only_t), color=CS, label="только наша")
 for yi, (b, t, o) in enumerate(zip(both, only_t, only_o)):
     ax.text(b / 2, yi, str(b), ha="center", va="center", color="white"); ax.text(b + t / 2, yi, str(t), ha="center", va="center", color="white"); ax.text(b + t + o + 10, yi, str(o), va="center", color=INK)
-ax.set_yticks(y); ax.set_yticklabels(labels); ax.set_xlabel("позиций из 2 000 (fresh-набор)"); ax.legend(frameon=False, loc="lower right"); ax.grid(axis="y", visible=False)
+ax.set_yticks(y); ax.set_yticklabels(labels); ax.set_xlabel("позиций из 2 000 (fresh-набор)"); ax.set_xlim(0, 2000); ax.legend(frameon=False, loc="lower right", ncol=3); ax.grid(axis="y", visible=False)
 ax.set_title("Парный анализ: учитель почти не ошибается там, где правы мы; его плюс — «знание», не синтаксис", loc="left", color=INK, fontsize=11)
 save(fig, "paired.svg")
 
