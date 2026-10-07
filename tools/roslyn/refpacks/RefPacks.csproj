@@ -51,6 +51,10 @@
     <PackageReference Include="Lib.Harmony" Version="2.4.2" />
     <PackageReference Include="GodotSharp" Version="4.7.2" />
     <PackageReference Include="Revit_All_Main_Versions_API_x64" Version="2026.0.0" />
+    <PackageReference Include="DuckDB.NET.Data.Full" Version="1.5.6" />
+    <PackageReference Include="Microsoft.OData.Core" Version="9.0.0" />
+    <!-- xunit v3 next to v2: `Xunit.Assert` becomes ambiguous; the judge checks the members of every candidate -->
+    <PackageReference Include="xunit.v3" Version="4.0.1" />
     <!-- data / infrastructure -->
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
@@ -71,8 +75,8 @@
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="9.4.0" />
     <PackageReference Include="Microsoft.Extensions.ServiceDiscovery" Version="9.2.0" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.4.0" />
-    <PackageReference Include="Aspire.Hosting" Version="9.2.0" />
-    <PackageReference Include="Aspire.Hosting.Testing" Version="9.2.0" />
+    <PackageReference Include="Aspire.Hosting" Version="13.6.1" />
+    <PackageReference Include="Aspire.Hosting.Testing" Version="13.6.1" />
     <!-- web -->
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.12" />

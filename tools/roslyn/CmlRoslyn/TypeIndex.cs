@@ -71,9 +71,11 @@ public sealed class TypeIndex
     }
 
     /// <summary>Does an extension method with this name exist in any referenced assembly or in source?</summary>
+    readonly ConcurrentDictionary<string, bool> srcExtCache = new(StringComparer.Ordinal);
+
     public bool HasExtensionMethod(string name)
     {
-        if (comp.GetSymbolsWithName(name, SymbolFilter.Member).Any(s => s is IMethodSymbol { IsExtensionMethod: true })) return true;
+        if (srcExtCache.GetOrAdd(name, n => comp.GetSymbolsWithName(n, SymbolFilter.Member).Any(s => s is IMethodSymbol { IsExtensionMethod: true }))) return true;
         return ExtMethodCache.GetOrAdd(name, n =>
         {
             foreach (var r in IndexedRefs!)

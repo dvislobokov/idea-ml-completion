@@ -47,9 +47,10 @@ public static class Judge
             var isMember = receiver != null || name.Parent is MemberBindingExpressionSyntax;
             if (isMember) v.MemberAccesses++;
             bool recvKnown = false; string? recvType = null; int candidates = 0;
+            INamespaceOrTypeSymbol? recvSymForIndex = null;
             if (isMember)
             {
-                var recvSym = ReceiverSymbol(model, name, receiver, ct);
+                var recvSym = ReceiverSymbol(model, name, receiver, ct); recvSymForIndex = recvSym;
                 if (recvSym != null)
                 {
                     recvKnown = true; v.MemberRecvKnown++;
@@ -83,9 +84,16 @@ public static class Judge
                 {
                     if (!recvKnown)
                     {
-                        var fb = FallbackReceiver(model, name, receiver, index, ct);
-                        if (fb != null) { recvKnown = true; v.MemberRecvKnown++; recvType = fb.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat); candidates = CountMembers(fb); viaIndex = MemberNames(fb).Contains(text) || fb is INamespaceSymbol nsf && nsf.GetMembers(text).Any(); }
+                        var fbs = FallbackReceivers(model, name, receiver, index, ct);
+                        if (fbs.Count > 0)
+                        {
+                            var fb = fbs[0];
+                            recvKnown = true; v.MemberRecvKnown++; recvType = fb.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat); candidates = CountMembers(fb);
+                            viaIndex = fbs.Any(f => MemberNames(f).Contains(text) || f is INamespaceSymbol nsf && nsf.GetMembers(text).Any());
+                        }
                     }
+                    else if (recvSymForIndex is IErrorTypeSymbol { CandidateSymbols.Length: > 1 } amb)
+                        viaIndex = amb.CandidateSymbols.OfType<INamespaceOrTypeSymbol>().Any(f => MemberNames(f).Contains(text));
                     if (!viaIndex && name.Parent?.Parent is InvocationExpressionSyntax or ConditionalAccessExpressionSyntax && index.HasExtensionMethod(text)) viaIndex = true;
                 }
                 if (viaIndex) { resolved = true; v.ViaIndex++; }
@@ -140,13 +148,14 @@ public static class Judge
     /// <summary>Receiver type when the semantic model has only an error type for the receiver: the candidates of an ambiguous
     /// type, or the type of that simple name looked up in the index (missing `using`), or the declared (unbound) type of a
     /// local / parameter / field / property looked up by its name and arity.</summary>
-    static INamespaceOrTypeSymbol? FallbackReceiver(SemanticModel model, SimpleNameSyntax name, ExpressionSyntax? receiver, TypeIndex index, CancellationToken ct)
+    static List<INamespaceOrTypeSymbol> FallbackReceivers(SemanticModel model, SimpleNameSyntax name, ExpressionSyntax? receiver, TypeIndex index, CancellationToken ct)
     {
+        var res = new List<INamespaceOrTypeSymbol>();
         if (receiver == null)
         {
             var cond = name.Parent?.Parent;
             while (cond != null && cond is not ConditionalAccessExpressionSyntax) cond = cond.Parent;
-            if (cond is ConditionalAccessExpressionSyntax cae) receiver = cae.Expression; else return null;
+            if (cond is ConditionalAccessExpressionSyntax cae) receiver = cae.Expression; else return res;
         }
         ITypeSymbol? errType = model.GetTypeInfo(receiver, ct).Type;
         var si = model.GetSymbolInfo(receiver, ct);
@@ -158,20 +167,17 @@ public static class Judge
             case IFieldSymbol f: errType = f.Type; break;
             case IPropertySymbol pr: errType = pr.Type; break;
             case IMethodSymbol m: errType = m.ReturnType; break;
-            case INamespaceOrTypeSymbol nt when nt is not ITypeSymbol { TypeKind: TypeKind.Error }: return nt;
+            case INamespaceOrTypeSymbol nt when nt is not ITypeSymbol { TypeKind: TypeKind.Error }: res.Add(nt); return res;
         }
         if (errType is IErrorTypeSymbol et)
         {
-            if (!et.CandidateSymbols.IsDefaultOrEmpty && et.CandidateSymbols[0] is INamespaceOrTypeSymbol c) return c;
-            if (et.Name.Length > 0) { var found = index.Lookup(et.Name, et.Arity); if (found.Length > 0) return found[0]; }
+            if (!et.CandidateSymbols.IsDefaultOrEmpty) res.AddRange(et.CandidateSymbols.OfType<INamespaceOrTypeSymbol>());
+            if (res.Count == 0 && et.Name.Length > 0) res.AddRange(index.Lookup(et.Name, et.Arity));
         }
-        else if (errType != null && errType.TypeKind != TypeKind.Error) return errType;
-        if (sym == null && receiver is SimpleNameSyntax rs)
-        {
-            var found = index.Lookup(rs.Identifier.ValueText, rs is GenericNameSyntax g ? g.Arity : 0);
-            if (found.Length > 0) return found[0];
-        }
-        return null;
+        else if (errType != null && errType.TypeKind != TypeKind.Error) { res.Add(errType); return res; }
+        if (res.Count == 0 && sym == null && receiver is SimpleNameSyntax rs)
+            res.AddRange(index.Lookup(rs.Identifier.ValueText, rs is GenericNameSyntax g ? g.Arity : 0));
+        return res;
     }
 
     /// <summary>Distinct member names visible on a type (including base types and interfaces for interfaces) or namespace.</summary>

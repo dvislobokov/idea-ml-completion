@@ -27,10 +27,25 @@ The corpus snapshots contain only `*.cs` (+ LICENSE/README) — no `.csproj`/`.s
   OpenTK, ImageSharp, BenchmarkDotNet, Swashbuckle, …), read from `refpacks/obj/project.assets.json`;
 - `--extra-refs dir;dir` adds more DLLs.
 
-Consequences: packages outside this set (Unity, Godot, Xamarin, MonoGame, Terraria/tModLoader, …) are unresolved —
-such positions show up as "receiver type unknown" / "true line does not resolve"; types with the same name in several
-projects of one repository bind as ambiguities (still counted as "resolves"). Preprocessor symbols:
-`DEBUG TRACE NET NETCOREAPP NET10_0 NET*_OR_GREATER`.
+  The set was extended data-driven with the `usings` command (unresolved `using` namespaces over the 199 test repos):
+  ~115 packages now, incl. UnityEngine.Modules, MonoGame, Krafs.Rimworld.Ref, Lib.Harmony, GodotSharp, Revit API, Npgsql,
+  StackExchange.Redis, MongoDB, EF6, gRPC/protobuf, OpenTelemetry, Aspire.Hosting, Roslyn, MSBuild, PowerShell SDK,
+  Spectre.Console, System.CommandLine, SkiaSharp, NAudio, ReactiveUI, Xamarin.Forms, Windows SDK contracts (`.winmd`),
+  the Android / iOS reference packs (`PackageDownload`, globbed from `~/.nuget/packages`).
+- **TypeIndex** (`TypeIndex.cs`, on by default, `--no-index` to disable): the corpus lost the `.csproj` and with it
+  `<Using Include=…>` / SDK implicit usings, so a name that does not bind is looked up by simple name (+ arity) over every
+  referenced assembly and the repository source; an extension method is accepted when one with that name exists anywhere;
+  a receiver whose declared type is an error type takes the ambiguity candidates or the index type of that name. Names that
+  resolve only this way are counted in `*_via_index`; `*_resolvable_strict` is the verdict of the semantic model alone.
+  This is what the IDE with the real project would see, minus packages that are not on NuGet at all.
+
+Consequences: packages outside the refpacks set (Terraria/tModLoader, 7 Days to Die, DOTween, UnityEditor, …) are
+unresolved — such positions show up as "receiver type unknown" / "true line does not resolve"; types with the same name
+in several projects of one repository bind as ambiguities (counted as "resolves"). Preprocessor symbols:
+`DEBUG TRACE NET NETCOREAPP NET10_0 NET*_OR_GREATER`. Run `cmlroslyn selftest` after touching the judge (25 synthetic
+receiver / index cases). `refpacks/obj/project.assets.json` is found by walking up from the binary or the cwd (or
+`--assets` / `CMLROSLYN_ASSETS`); a missing file is an error (`--allow-no-assets` to run with the SDK ref packs only — the
+first measurement ran like that by accident and lost every NuGet type).
 
 ## Commands
 
@@ -50,6 +65,13 @@ With `--context` it also builds the context block from the file with the middle 
 identifiers of the true rest are in the file prefix, only in the context block, or nowhere (`ids_*`, `ctx`).
 At the end it prints the headroom table (precision / shown with and without the filter per `conf_prod` threshold; the
 "ideal filter" column applies the filter only where the true line resolves, i.e. what a fully restored project would give).
+
+```
+cmlroslyn usings --positions <eval.json> | --manifest <manifest.jsonl> [--fold test] --repos <root> --out <tsv> [--threads 4]
+```
+Unresolved `using` namespaces per repository (TSV: namespace, repos, files, first repo names) — the input for extending
+`refpacks/RefPacks.csproj`. `python3 tools/roslyn/report.py <filter.jsonl> [--bpe tokenizer/cs-16384.bpe]` prints the
+coverage / headroom report of a filter run (REPORT.md is made from it).
 
 ```
 cmlroslyn context --manifest <manifest.jsonl> --repos <root> --out <dir> [--fold test] [--max-repos N]

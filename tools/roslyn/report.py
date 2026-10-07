@@ -60,7 +60,7 @@ def main():
         if a.bpe:
             sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'nn', 'tokenizer'))
             import cmlbpe
-            voc = cmlbpe.Vocab.load(a.bpe); toks = sorted(len(voc.encode(r['ctx'])) for r in c)
+            enc = cmlbpe.Encoder(cmlbpe.Vocab.load(a.bpe)); toks = sorted(len(enc.encode(r["ctx"])) for r in c)
             line += f', BPE tokens mean {sum(toks)/len(toks):.0f}, median {toks[len(toks)//2]}, p90 {toks[int(len(toks)*0.9)]}'
         P(''); P(line + f', empty {pct(sum(r["ctx_chars"]==0 for r in c), len(c))}')
         ids = sum(r['ids'] for r in c); P(f'identifiers of the true rest: {ids}; in the file prefix {pct(sum(r["ids_in_prefix"] for r in c), ids)}, only in the context block {pct(sum(r["ids_in_ctx_only"] for r in c), ids)}, nowhere {pct(sum(r["ids_nowhere"] for r in c), ids)}')
