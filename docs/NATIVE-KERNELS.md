@@ -161,6 +161,11 @@ copies and the Kotlin glue (profile with `-Dcompletionml.nn.profile=true`, see t
   **NEON verified 2026-10-07 on a MacBook Pro M1 Pro (32 GB)**: `NativeNnKernelsTest` reports
   `loaded libcmlkernels-macos-arm64.dylib, ISA neon-dotprod (detected neon-dotprod)` — the dylib loads from the jar without
   Gatekeeper prompts and the NEON + DotProd kernels pass the self-test against the scalar reference.
+  `NnBench` on the real cs31m model (`models/cs-nn-31m-e1.cml`, 512-token prompt + 20 tokens, 4 threads, ms; prefill / decode per
+  token / line / line while typing with 8 new tokens): scalar Kotlin 219 / 1.71 / 252 / 40; native f32 120 / 2.28 / 164 / 49;
+  native q8 (`sdot`) 55 / 0.75 / 68 / 17 — ×3.7 on a cold line, ×2.4 while typing; `NnKernels.best()` picks q8 by itself.
+  The NEON f32 path decodes slower than scalar Kotlin (2.28 vs 1.71 ms/token): not the default, but worth a look if f32 is ever needed.
+  Scalar Kotlin on the M1 Pro is on par with the EPYC server at 4 threads.
 - **AVX-VNNI (VEX) level** untested (no Alder Lake/Zen 5 here); guarded by the self-test.
 
 ## Known gaps / next steps if we ship

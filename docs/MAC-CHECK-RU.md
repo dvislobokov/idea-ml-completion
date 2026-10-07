@@ -47,6 +47,12 @@ java -cp "$(cat /tmp/cp.txt)" io.github.completionml.core.nn.NnBench --file mode
 Печатает prefill / decode / line / reuse8 в мс (протокол как в `docs/NATIVE-KERNELS.md`). На сервере (EPYC, 8 потоков) было
 530 / 167 мс на строку для скалярного / native q8; интересно, сколько даст M-серия с 4–8 потоками.
 
+## Результаты на MacBook Pro M1 Pro, 32 ГБ (2026-10-07)
+
+Шаг 1: `native: loaded libcmlkernels-macos-arm64.dylib, ISA neon-dotprod (detected neon-dotprod)` — Gatekeeper не вмешался,
+NEON+DotProd прошли самопроверку. Шаг 3, 4 потока, реальная модель cs31m, строка целиком / при наборе: скалярный Kotlin 252 / 40 мс,
+native f32 164 / 49 мс, native q8 68 / 17 мс (`--kernels best` выбирает q8 сам). Шаг 2 (паритет) — ожидается.
+
 ## Что прислать
 
 Три фрагмента вывода: строку `native: …` (или `SKIP …`), итог `NnParityTest`, и таблицу `NnBench`. Плюс модель Mac
