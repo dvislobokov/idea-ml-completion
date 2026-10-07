@@ -27,17 +27,55 @@ object InlinePrompt {
 
     private fun tail(a: IntArray, n: Int): IntArray = if (n <= 0 || n >= a.size) a else a.copyOfRange(a.size - n, a.size)
 
+    /** Granularity of the stable prefix cut in tokens (see [stableTail]). */
+    const val CUT_STEP = 256
+
+    private val lineStartTables = java.util.WeakHashMap<BpeTokenizer, BooleanArray>()
+
+    /** Per vocabulary: token starts a line (its bytes begin with LF or CR); specials do not. */
+    fun lineStartTable(tok: BpeTokenizer): BooleanArray = synchronized(lineStartTables) {
+        lineStartTables.getOrPut(tok) {
+            BooleanArray(tok.vocabSize).also { t ->
+                for (id in 0 until tok.specialBase) {
+                    val b = tok.tokenBytes(id)
+                    t[id] = b.isNotEmpty() && (b[0] == '\n'.code.toByte() || b[0] == '\r'.code.toByte())
+                }
+            }
+        }
+    }
+
+    /**
+     * The last ~[target] tokens of [a], cut at a line start that stays put while the user types: the cut index is the
+     * first line-start token at or after `(a.size - target)` rounded DOWN to a multiple of [CUT_STEP], so the window
+     * moves only every [CUT_STEP] tokens and the KV cache of the previous prompt is reused in between (a cut exactly
+     * `target` from the end shifts by one token per keystroke once the caret is deeper than `target`, and nothing can
+     * be reused). The prefix may exceed [target] by up to [CUT_STEP] + one line but never [hardCap]; with the default
+     * `maxPrefix 1024` and ctx 2000 there is room. Mirrors `eval_inline.stable_tail`.
+     */
+    fun stableTail(tok: BpeTokenizer, a: IntArray, target: Int, hardCap: Int): IntArray {
+        if (target <= 0 || a.size <= target) return a
+        val ls = lineStartTable(tok)
+        val s0 = a.size - target
+        var c = (s0 / CUT_STEP) * CUT_STEP
+        val limit = minOf(a.size - target / 2, s0 + 2 * CUT_STEP)    // never shorter than half the target
+        while (c < limit && !ls[a[c]]) c++
+        if (c >= limit) c = s0                                        // no line start in reach: the exact tail
+        if (a.size - c > hardCap) c = a.size - hardCap
+        return a.copyOfRange(c, a.size)
+    }
+
     fun plain(tok: BpeTokenizer, path: ByteArray, prefix: ByteArray, ctx: Int): IntArray {
         val hdr = header(tok, path)
-        return hdr + tail(tok.encodeBytes(prefix), ctx - hdr.size)
+        return hdr + stableTail(tok, tok.encodeBytes(prefix), ctx - hdr.size, ctx - hdr.size)
     }
 
     fun spm(tok: BpeTokenizer, path: ByteArray, prefix: ByteArray, suffix: ByteArray, ctx: Int, maxPrefix: Int, suffixTokens: Int): IntArray {
         val hdr = header(tok, path)
         val suf = tok.encodeBytes(suffix).let { if (it.size > suffixTokens) it.copyOf(suffixTokens) else it }
-        val budget = minOf(maxPrefix, ctx - hdr.size - suf.size - 3)
+        val hardCap = ctx - hdr.size - suf.size - 3
+        val budget = minOf(maxPrefix, hardCap)
         require(budget > 0) { "no room for the prefix: ctx $ctx, header ${hdr.size}, suffix ${suf.size}" }
-        return intArrayOf(tok.fimPrefix, tok.fimSuffix) + suf + intArrayOf(tok.fimMiddle) + hdr + tail(tok.encodeBytes(prefix), budget)
+        return intArrayOf(tok.fimPrefix, tok.fimSuffix) + suf + intArrayOf(tok.fimMiddle) + hdr + stableTail(tok, tok.encodeBytes(prefix), budget, hardCap)
     }
 
     /** Ids that end a line in the eval's stop rule: every token starting with LF/CR, and every special token. */

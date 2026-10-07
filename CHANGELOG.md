@@ -682,6 +682,13 @@ caret**: the editor pairs `)`; `trimClosersAfterCaret` drops the suggestion tail
 0.8 (table in docs/NN-COMPLETION-API.md: Go 25.8 % shown / 93.5 % exact, C# 14.2 % / 94.4 %); dropping the newline probability from
 the product does not improve the trade-off. Heal-parity fixture regenerated with go31m-e2 (`make_parity_heal.py --heal word-eol`).
 
+**Stable prefix cut (0.2.207 feedback: deep in a file the prompt window moved by one token per keystroke and the KV cache was never
+reused).** `InlinePrompt.stableTail` (and `stable_tail` in the harness): when the prefix exceeds `maxPrefix`, the cut is taken at the
+start of a line and quantised to steps of 256 tokens from the file start, so the window only moves when the caret advances by another
+256 tokens; the hard cap is `maxPrefix + 256 + one line`. Go go31m-e2, 3 000 positions, `--max-prefix 1024`: exact 63.6 → 63.7 %,
+shown at ≥ 0.7 43.8 / 95.7 % → 44.5 / 96.0 %, mean prompt 1 604 → 1 406 tokens (the old cut kept 1 450 of the prefix). Heal-parity
+fixture regenerated: scalar / native-f32 99 / 99 prompts and texts identical.
+
 **Project bigram cache at decode time — negative result** (`eval_inline.py --project-cache λ`, `ProjectCache`: bigram counts over the BPE
 tokens of the other files of the same repository, the completed file subtracted, mixed as p = (1−λ)·p_model + λ·p_cache(prev)):
 Go go31m-e2 63.6 → 63.4 % (λ 0.1) / 63.5 % (0.2), C# cs31m-e2-lr2e3 50.2 → 50.3 % (0.05) / 50.2 % (0.1); paired flips Go +3 / −8,

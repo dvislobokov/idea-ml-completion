@@ -381,6 +381,7 @@ class Tokenizer:
         self.special_base = self.vocab.special_base
         self.tokens = self.vocab.tokens                       # byte string per non-special id
         self.tok_len = [len(t) for t in self.tokens]
+        self.line_start = [t[:1] in (b"\n", b"\r") for t in self.tokens] + [False] * (self.vocab_size - len(self.tokens))   # InlinePrompt.lineStartTable
         # vocabulary prefix table: ids of the non-special tokens sorted by byte string (mirrors Kotlin VocabPrefixIndex)
         self._sorted_ids = sorted(range(self.special_base), key=lambda i: self.tokens[i])
         self._sorted_bytes = [self.tokens[i] for i in self._sorted_ids]
@@ -445,6 +446,26 @@ def punct_only(gen: bytes):
     return PUNCT_ONLY.search(gen) is None
 
 
+CUT_STEP = 256
+
+
+def stable_tail(tok, ids, target, hard_cap):
+    """Mirror of InlinePrompt.stableTail: the prefix tail cut at a line start whose index is stable while typing."""
+    if target <= 0 or len(ids) <= target:
+        return ids
+    s0 = len(ids) - target
+    c = (s0 // CUT_STEP) * CUT_STEP
+    limit = min(len(ids) - target // 2, s0 + 2 * CUT_STEP)
+    ls = tok.line_start
+    while c < limit and not ls[ids[c]]:
+        c += 1
+    if c >= limit:
+        c = s0
+    if len(ids) - c > hard_cap:
+        c = len(ids) - hard_cap
+    return ids[c:]
+
+
 def build_prompt(tok, p, mode, ctx, suffix_tokens, with_path, max_prefix=1450, heal=False):
     """Prompt of at most `ctx` tokens: header + prefix tail (<= max_prefix) [+ suffix head (<= suffix_tokens)].
     Mirrors the training documents (data.py: FIM doc <= seq_len - 8 with suffix <= 512, middle <= 256, prefix = the
@@ -460,14 +481,15 @@ def build_prompt(tok, p, mode, ctx, suffix_tokens, with_path, max_prefix=1450, h
     pre = tok.encode(text[a:cur])
     if mode == "plain":
         budget = ctx - len(hdr)
-        return hdr + pre[-budget:]
+        return hdr + stable_tail(tok, pre, budget, budget)
     suf = tok.encode(text[p["eol"]:p["eol"] + 16000])[:suffix_tokens]
-    budget = min(max_prefix, ctx - len(hdr) - len(suf) - 3)
+    hard_cap = ctx - len(hdr) - len(suf) - 3
+    budget = min(max_prefix, hard_cap)
     assert budget > 0, (ctx, len(hdr), len(suf))
     if mode == "spm":   # Code Llama variant: the middle follows the prefix directly
-        return [tok.fim_prefix, tok.fim_suffix] + suf + [tok.fim_middle] + hdr + pre[-budget:]
+        return [tok.fim_prefix, tok.fim_suffix] + suf + [tok.fim_middle] + hdr + stable_tail(tok, pre, budget, hard_cap)
     assert mode == "fim", mode
-    return [tok.fim_prefix] + hdr + pre[-budget:] + [tok.fim_suffix] + suf + [tok.fim_middle]
+    return [tok.fim_prefix] + hdr + stable_tail(tok, pre, budget, hard_cap) + [tok.fim_suffix] + suf + [tok.fim_middle]
 
 
 # ----------------------------------------------------------------------------------------------------- inference
