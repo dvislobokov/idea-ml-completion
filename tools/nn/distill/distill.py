@@ -90,8 +90,9 @@ def cmd_generate(a):
     llm = LLM(model=a.model, dtype="bfloat16", gpu_memory_utilization=0.85, max_model_len=4096, enable_prefix_caching=True)
     tok = llm.get_tokenizer()
     nl_ids = [i for i in range(len(tok)) if "\n" in tok.decode([i]) or "\r" in tok.decode([i])]
+    added = list(getattr(tok, "added_tokens_decoder", {}).keys())   # <|fim_pad|>, <|file_sep|>, ...: Qwen ends a middle with them
     fp, fs, fm, fsep = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|file_sep|>"
-    sp = SamplingParams(temperature=0.0, max_tokens=a.max_new, stop=["\n"], stop_token_ids=nl_ids + [tok.eos_token_id],
+    sp = SamplingParams(temperature=0.0, max_tokens=a.max_new, stop=["\n"], stop_token_ids=nl_ids + added + [tok.eos_token_id],
                         logprobs=1, skip_special_tokens=True)
     out = open(a.out, "a", encoding="utf-8")
     B = a.batch
@@ -104,7 +105,7 @@ def cmd_generate(a):
             typed.append(ty)
         outs = llm.generate(prompts, sp, use_tqdm=False)
         for r, o, ty in zip(chunk, outs, typed):
-            text = o.outputs[0].text.split("\n")[0].split("\r")[0]
+            text = o.outputs[0].text.split("\n")[0].split("\r")[0].split("<|")[0]
             lps = [list(d.values())[0].logprob for d in (o.outputs[0].logprobs or []) if d]
             conf = float(np.exp(sum(lps))) if lps else 0.0
             if ty:
@@ -119,6 +120,55 @@ def cmd_generate(a):
     out.close()
 
 
+def cmd_generate_hf(a):
+    """Fallback without vLLM: batched greedy generation with transformers (slower, ~5x)."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
+    recs = [json.loads(l) for l in open(a.inp, encoding="utf-8")]
+    if a.part:
+        k, m = map(int, a.part.split("/")); recs = recs[k::m]
+    tok = AutoTokenizer.from_pretrained(a.model); tok.padding_side = "left"
+    if tok.pad_token is None: tok.pad_token = tok.eos_token
+    model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, attn_implementation="sdpa").cuda().eval()
+    stop_ids = {i for i in range(len(tok)) if "\n" in tok.decode([i]) or "\r" in tok.decode([i])} | {tok.eos_token_id} | set(getattr(tok, "added_tokens_decoder", {}))
+
+    class Stop(StoppingCriteria):
+        def __init__(self, start): self.start = start
+        def __call__(self, input_ids, scores, **kw):
+            new = input_ids[:, self.start:]
+            return torch.tensor([any(int(t) in stop_ids for t in row.tolist()) for row in new], device=input_ids.device)
+    fp, fs, fm, fsep = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|file_sep|>"
+    out = open(a.out, "a", encoding="utf-8")
+    order = sorted(range(len(recs)), key=lambda i: len(recs[i]["prefix"]) + len(recs[i]["suffix"]))
+    B = a.batch
+    with torch.no_grad():
+        for k in range(0, len(order), B):
+            idx = order[k:k + B]; chunk = [recs[i] for i in idx]
+            prompts, typed = [], []
+            for r in chunk:
+                pp, ty = heal_split(r["prefix"]); prompts.append(f"{fp}{fsep}{r['path']}\n{pp}{fs}{r['suffix']}{fm}"); typed.append(ty)
+            enc = tok(prompts, return_tensors="pt", padding=True, truncation=True, max_length=3000).to("cuda")
+            L = enc.input_ids.shape[1]
+            g = model.generate(**enc, max_new_tokens=a.max_new, do_sample=False, output_scores=True, return_dict_in_generate=True,
+                               stopping_criteria=StoppingCriteriaList([Stop(L)]), pad_token_id=tok.pad_token_id)
+            seqs = g.sequences[:, L:]; steps = len(g.scores)
+            probs = torch.stack([torch.softmax(sc.float(), -1).max(-1).values for sc in g.scores], 1)
+            for j, (r, ty) in enumerate(zip(chunk, typed)):
+                ids = seqs[j, :steps].tolist(); conf = 1.0; n_gen = None
+                for t, tid in enumerate(ids):
+                    conf *= float(probs[j, t])
+                    if tid in stop_ids: n_gen = t; break
+                if n_gen is None: continue
+                text = tok.decode(ids[:n_gen], skip_special_tokens=True).split("\n")[0].split("\r")[0]
+                if ty:
+                    if not text.startswith(ty): continue
+                    text = text[len(ty):]
+                if not text.strip(): continue
+                out.write(json.dumps({"fi": r["fi"], "a": r["a"], "b": r["b"], "true": r["true"], "teacher": text, "conf": conf}, ensure_ascii=False) + "\n")
+            if (k // B) % 20 == 0: print(f"{k + len(idx)}/{len(order)}", flush=True); out.flush()
+    out.close()
+
+
 def cmd_encode(a):
     import data as D
     tok = D.Tokenizer(a.vocab)
@@ -126,7 +176,10 @@ def cmd_encode(a):
     n = 0
     for l in open(a.inp, encoding="utf-8"):
         r = json.loads(l)
-        t = tok.encode(r["teacher"])
+        line = r["teacher"].split("<|")[0]      # older generations carried special tokens as text
+        if not line.strip():
+            continue
+        t = tok.encode(line)
         if not t or len(t) > MAX_MID:
             continue
         fi.append(r["fi"]); aa.append(r["a"]); bb.append(r["b"]); ids.extend(t); off.append(len(ids)); n += 1
@@ -144,9 +197,12 @@ def main():
     g = sub.add_parser("generate"); g.add_argument("--model", required=True); g.add_argument("--in", dest="inp", required=True)
     g.add_argument("--out", required=True); g.add_argument("--part", default=""); g.add_argument("--batch", type=int, default=256)
     g.add_argument("--max-new", type=int, default=48)
+    h = sub.add_parser("generate-hf"); h.add_argument("--model", required=True); h.add_argument("--in", dest="inp", required=True)
+    h.add_argument("--out", required=True); h.add_argument("--part", default=""); h.add_argument("--batch", type=int, default=32)
+    h.add_argument("--max-new", type=int, default=48)
     e = sub.add_parser("encode"); e.add_argument("--vocab", required=True); e.add_argument("--in", dest="inp", required=True); e.add_argument("--out", required=True)
     a = ap.parse_args()
-    {"sample": cmd_sample, "generate": cmd_generate, "encode": cmd_encode}[a.cmd](a)
+    {"sample": cmd_sample, "generate": cmd_generate, "generate-hf": cmd_generate_hf, "encode": cmd_encode}[a.cmd](a)
 
 
 if __name__ == "__main__":
