@@ -160,6 +160,14 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
 - Never edit a script while a unit runs it (bash reads incrementally — it killed the C# proxy run). Backup archive for the user:
   ~/work/backup/ckpts-evals-2026-10-07.tar (1.9 GB).
 
+## 2026-10-08 02:30 МСК — the user stopped all GPU work (money); state for whoever continues
+- GPUs idle; nothing trains. Distillation is UNDECIDED: no proxy comparison completed (C# killed by my script edit, Go stopped at the teacher
+  stage). Saved: C# 1.5B teacher lines (data/csharp-distill, 246 k) and Go 7B lines (data/go-distill, 75 k of 300 k). To finish on any
+  GPU box: `proxy-run.sh <lang> <run> 0,1 1.5e9 [--teacher <npz> --teacher-rate 1.0]` for base vs teacher (20 min each), then 50 M if ≥ +1 p.p.
+- Still running on CPU: the .NET plugin agent (inline provider + weigher + settings, pushes to master). Everything else is pushed.
+- Not on GitHub: checkpoints (.pt) — ~/work/backup/ckpts-evals-2026-10-07.tar (1.9 GB; the four shipped models + evals + parity fixture),
+  the module cache /root/go/pkg/mod (50 GB, re-downloadable), HF models (re-downloadable), corpora (re-downloadable in ~1 h).
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher
