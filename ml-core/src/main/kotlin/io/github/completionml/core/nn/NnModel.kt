@@ -16,7 +16,8 @@ import kotlin.math.sqrt
  */
 class NnModel(
     val weights: NnFormat.Model,
-    nThreads: Int = 1,
+    /** Worker threads for prefill/decode; the default uses the cores (≤ 8: beyond that decode is memory-bound) so a plugin cannot forget it. */
+    nThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 8),
     val kernels: NnKernels = NnKernels.best(),
 ) : AutoCloseable {
     val config: NnConfig = weights.config
