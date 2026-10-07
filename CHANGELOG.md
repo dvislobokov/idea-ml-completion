@@ -614,6 +614,12 @@ base) does not do fill-in-the-middle — mostly empty middles — so the Qwen2.5
 **DDP** (`train.py` under `torchrun --nproc_per_node 2`): data groups striped by rank (`PackedStream(rank, world_size)`, unit test
 `test_ddp_striping`), `--tokens-per-step` stays the global batch, rank 0 builds the path-token cache and writes checkpoints carrying every rank's stream
 state (resume only with the same world size), loss all-reduced for logging, eval/metrics on rank 0, `require_backward_grad_sync` once per step.
+**Go baseline on the scrubbed corpus** (`go31m-e2`: go31m preset, new `go-16384.bpe`, fim 0.7 / spm 0.5, the lr 2e-3 / 0.5 M recipe, 6.85 G tokens,
+13 065 steps in 49 min on both GPUs): eval ppl 2.99 plain / 3.30 FIM (int8 export 2.988 → 2.989). Standard whole-line evaluation (3 000 positions,
+2 560 files, SPM, healing): rest of line exact **63.6 %** (plain 60.0 %), ≤ 8 tokens 74.8 %, first token 0.881; prod ≥ 0.8 shown 36.1 % with
+97.0 % exact lines, ≥ 0.9: 26.7 % / 98.1 %. go31m-e1 (e16, unscrubbed corpus, broken PSM, other vocabulary and test fold) had 61.7 % / 73.3 % / 0.88:
+not worse, slightly better, and publishable — `models/go-nn-31m-e2.cml`. Fresh-repository numbers and the teachers on Go follow.
+
 Smoke on the C# shards (6 min + 3 min resume): resume continues exactly (step 399 → 591, loss continuous); throughput while both GPUs were shared with the
 teacher evaluations 1.3 M tok/s; clean measurement on idle GPUs **2.45 M tok/s** (1.96× one GPU at 1.25 M; 428 ms per 1 M-token step), so a
 31 M epoch takes 47 min instead of 77. The Go baseline `go31m-e2` (scrubbed corpus, fim 0.7, lr 2e-3 / 0.5 M) runs on both GPUs with it.
