@@ -158,7 +158,9 @@ copies and the Kotlin glue (profile with `-Dcompletionml.nn.profile=true`, see t
   signed, notarised plugin zip are fine if the dylib is itself code-signed (ad-hoc signing `codesign -s -` is enough for
   `dlopen` of a library the user's app writes to disk, but the Marketplace build should sign with the Developer ID and
   include the dylibs in the notarisation of the plugin archive). Hardened runtime of the JBR allows JNI libraries.
-  **NEON kernels are untested** — written against the intrinsics reference; the self-test at load guards them.
+  **NEON verified 2026-10-07 on a MacBook Pro M1 Pro (32 GB)**: `NativeNnKernelsTest` reports
+  `loaded libcmlkernels-macos-arm64.dylib, ISA neon-dotprod (detected neon-dotprod)` — the dylib loads from the jar without
+  Gatekeeper prompts and the NEON + DotProd kernels pass the self-test against the scalar reference.
 - **AVX-VNNI (VEX) level** untested (no Alder Lake/Zen 5 here); guarded by the self-test.
 
 ## Known gaps / next steps if we ship

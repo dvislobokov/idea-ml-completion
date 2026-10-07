@@ -146,7 +146,12 @@ object NnBench {
         }
     }
 
-    private fun rssMb(): Double =
-        File("/proc/self/status").readLines().firstOrNull { it.startsWith("VmRSS:") }
-            ?.split(Regex("\\s+"))?.get(1)?.toDouble()?.div(1024) ?: -1.0
+    /** Resident set size in MB: /proc on Linux, `ps` on macOS; -1 when unavailable (Windows). */
+    private fun rssMb(): Double = runCatching {
+        val proc = File("/proc/self/status")
+        if (proc.exists()) proc.readLines().firstOrNull { it.startsWith("VmRSS:") }
+            ?.split(Regex("\\s+"))?.get(1)?.toDouble()?.div(1024)
+        else ProcessBuilder("ps", "-o", "rss=", "-p", ProcessHandle.current().pid().toString()).start()
+            .inputStream.bufferedReader().readText().trim().toDoubleOrNull()?.div(1024)
+    }.getOrNull() ?: -1.0
 }
