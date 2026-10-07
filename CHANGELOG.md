@@ -628,6 +628,11 @@ eval ppl 2.83 / FIM 3.12 (31 M: 2.99 / 3.30). Standard 3 000 positions (SPM, hea
 fresh repositories 59.2 % (56.6 %), ≤ 8 tokens 71.7 % (69.6 %). +2.1 / +2.6 p.p. — Go gains more from capacity than C# (+1.4 / +2.6).
 Published as `models/go-nn-50m-e3-lr2e3.cml` (optional big model; the 31 M stays the default for weaker laptops).
 
+**Two epochs for C# 31 M** (`cs31m-e4-2ep`: the lr2e3 recipe over 11.3 G tokens, 21 553 steps, 83 min on both GPUs): eval ppl 3.65 / FIM 3.82
+(1 epoch: 3.80 / 3.98) but rest of line exact 50.0 % vs 50.2 %, ≤ 8 tokens 62.3 % vs 62.6 %, first token 0.825 vs 0.821; fresh repositories
+42.8 % vs 40.9 %. The lower perplexity does not turn into more exact lines on the standard test (+1.9 p.p. on fresh code only): C# is not
+data-starved at 31 M; the model is not published. (go50m / cs50m gained more from capacity than from a second pass.)
+
 **First live run of go-nn-31m-e2 in the Go plugin (0.2.199–0.2.202, reported by the plugin agent) → three engine changes** (`NnCompletion`,
 mirrored in the harness): (1) **word-start healing** — `return le⟨⟩` is a pre-token boundary (the word ends at the caret), so the model
 continued a finished ` le` with `(` (confProd 0.003–0.05) while `len` typed gave `(o.items)` at 0.73; `Options.healMode = WORD_EOL`
