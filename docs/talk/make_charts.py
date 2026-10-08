@@ -326,4 +326,42 @@ bars(ax, labels, [[0.526, 0.253, 0.442, 0.711], [0.367, 0.176, 0.279, 0.588], [0
 ax.set_title("C#, 127 репо / 22 081 список, сплит 4:1 по репозиториям: ranker 0.711 MRR против правил 0.526", loc="left", color=INK, fontsize=11)
 save(fig, "ranker_cs_e18.svg")
 
+# ---------- 30. GBDT ranker e19 vs linear vs rules, paired held-out lists (CHANGELOG e19) ----------
+fig, ax = plt.subplots(figsize=(10, 4.6))
+labels = ["Go: правила\nплагина", "Go: линейный\ne17b (210 весов)", "Go: GBDT e19\n(321 дерева)", "C#: правила\nплагина", "C#: линейный\ne18 (224 веса)", "C#: GBDT e19\n(200 деревьев)"]
+mrr = [0.513, 0.799, 0.834, 0.530, 0.713, 0.759]; top1 = [0.380, 0.700, 0.750, 0.370, 0.589, 0.651]; top5 = [0.662, 0.926, 0.943, 0.728, 0.873, 0.895]
+bars(ax, labels, [mrr, top1, top5], [VIO, AQUA, YEL], ["MRR", "top-1", "top-5"], fmt="{:.3f}", ylim=(0, 1.05))
+ax.axvline(2.5, color="#c9c8c2", linewidth=0.8)
+ax.set_title("Парное сравнение на тех же held-out списках: Go 11 845 (100 репо), C# 4 608 (26 репо) — GBDT +3.5 / +4.6 MRR", loc="left", color=INK, fontsize=11)
+save(fig, "ranker_gbdt.svg")
+
+# ---------- 31. GBDT vs linear per context kind (CHANGELOG e19 «Per context») ----------
+fig, ax = plt.subplots(figsize=(10, 4.6))
+kinds = ["после `.`", "начало\nоператора", "аргумент", "позиция\nтипа", "правая часть\nприсваивания", "прочее"]
+bars(ax, kinds, [[0.767, 0.850, 0.878, 0.870, 0.822, 0.874], [0.738, 0.824, 0.855, 0.843, 0.792, 0.782],
+                 [0.669, 0.763, 0.801, 0.715, 0.824, 0.749], [0.635, 0.706, 0.747, 0.689, 0.773, 0.713]],
+     [GO, "#8fb8ea", CS, "#f3a98a"], ["Go GBDT", "Go линейный", "C# GBDT", "C# линейный"], fmt="{:.2f}", ylim=(0, 1.0), ylabel="MRR")
+ax.set_title("По видам контекста: GBDT выигрывает везде, сильнее всего где линейная модель слабее («прочее» Go +9 п.п.)", loc="left", color=INK, fontsize=10)
+save(fig, "ranker_gbdt_kinds.svg")
+
+# ---------- 32. GBDT feature importance, gain share (CHANGELOG e19) ----------
+fig, ax = plt.subplots(figsize=(10, 4.6))
+feats = ["file_freq_log", "recency_log", "freq_rank_log", "lm_rank_log", "prefix_case_match", "decl_distance_log", "rule_rank_log", "scope_level", "in_vocab", "lm_delta_best", "lm_logprob + lm_global_logprob"]
+imp_go = [29, 14, 9.6, 9.6, 4.6, 4.6, 2.5, 3.5, 2.9, 2.2, 2.8]; imp_cs = [42, 17, 2.1, 2.6, 10.2, 1.2, 5.2, 2.4, 1.6, 1.0, 2.0]
+y = np.arange(len(feats)); h = 0.38
+ax.barh(y + h / 2, imp_go[::-1], height=h, color=GO, label="Go (321 дерева)"); ax.barh(y - h / 2, imp_cs[::-1], height=h, color=CS, label="C# (200 деревьев)")
+for yi, (a, b) in enumerate(zip(imp_go[::-1], imp_cs[::-1])):
+    ax.text(a + 0.4, yi + h / 2, f"{a:g} %", va="center", fontsize=9, color=INK); ax.text(b + 0.4, yi - h / 2, f"{b:g} %", va="center", fontsize=9, color=INK)
+ax.set_yticks(y); ax.set_yticklabels(feats[::-1]); ax.set_xlim(0, 48); ax.set_xlabel("доля gain по всем сплитам, % (сумма по копиям признака)"); ax.legend(frameon=False, loc="lower right"); ax.grid(axis="y", visible=False)
+ax.set_title("Важность признаков GBDT: статистика файла — больше половины gain", loc="left", color=INK, fontsize=11)
+save(fig, "gbdt_importance.svg")
+
+# ---------- 33. import statistics e20: hidden-import test, prior vs context (CHANGELOG e20) ----------
+fig, ax = plt.subplots(figsize=(10, 4.6))
+labels = ["Go top-1\n(129 078 запросов)", "Go top-3", "C# top-1\n(56 689 запросов)", "C# top-3"]
+prior = [68.5, 78.3, 77.7, 88.5]; ctx = [71.7, 79.7, 81.4, 91.0]
+bars(ax, labels, [prior, ctx], [GREY, AQUA], ["частотный prior p(path | name)", "+ контекст: PMI с импортами файла"], ylabel="скрытый импорт найден, %", ylim=(0, 100))
+ax.set_title("Скрываем один импорт упомянутого имени и ищем его обратно: контекст файла даёт +3.2 / +3.7 п.п. top-1", loc="left", color=INK, fontsize=11)
+save(fig, "imports_e20.svg")
+
 print("charts:", len(os.listdir(OUT)))

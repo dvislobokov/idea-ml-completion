@@ -31,14 +31,14 @@ style: |
 
 ## Go (`idea-golang-support`), C# (`idea-dotnet-support`) и общий движок `idea-ml-completion`
 
-Три слоя: n-граммная LM → listwise-ранкер списка → собственный трансформер для подсказки целой строки.
-Всё — Kotlin/JVM внутри плагина, без облака, без чужих моделей, без нативных рантаймов.
+Три слоя: n-граммная LM → ранкер списка (линейный → GBDT) → собственный трансформер для подсказки целой строки;
+рядом — статистика импортов из корпуса. Всё — Kotlin/JVM внутри плагина, без облака, без чужих моделей, без нативных рантаймов.
 
-<span class="src">Все числа — из CHANGELOG.md (e01–e18), docs/*.md и eval-файлов репозитория; источник указан в заметках к каждому слайду.</span>
+<span class="src">Все числа — из CHANGELOG.md (e01–e20), docs/*.md и eval-файлов репозитория; источник указан в заметках к каждому слайду.</span>
 
 <!--
-Источники: README.md, CLAUDE.md, CHANGELOG.md e01–e18, docs/NEURAL-RU.md, docs/NN-COMPLETION-API.md, docs/NATIVE-KERNELS.md,
-docs/NN-FORMAT.md, docs/NN-PARITY.md, docs/MAC-CHECK-RU.md, tools/psi/REPORT.md, tools/roslyn/REPORT.md, models/README.md,
+Источники: README.md, CLAUDE.md, CHANGELOG.md e01–e20, docs/NEURAL-RU.md, docs/NN-COMPLETION-API.md, docs/NATIVE-KERNELS.md,
+docs/NN-FORMAT.md, docs/NN-PARITY.md, docs/MAC-CHECK-RU.md, docs/IMPORTS-API.md, docs/ADAPTER.md, tools/psi/REPORT.md, tools/roslyn/REPORT.md, models/README.md,
 ~/work/ml-data/{go,csharp}/nn/eval-*.md и metrics.jsonl прогонов.
 -->
 
@@ -49,10 +49,10 @@ docs/NN-FORMAT.md, docs/NN-PARITY.md, docs/MAC-CHECK-RU.md, tools/psi/REPORT.md,
 1. Задача и ограничения
 2. Данные: корпуса, фильтры, два токенизатора
 3. Слой 1 — n-граммная LM (32 MB, 5-граммы)
-4. Слой 2 — ранкер списка автодополнения на реальных списках плагина
+4. Слой 2 — ранкер списка на реальных списках плагина: линейный → GBDT; статистика импортов из корпуса
 5. Слой 3 — собственный трансформер 31 M / 50 M с fill-in-the-middle
 6. Как мы это измеряем: harness, пороги, token healing, учителя, fresh-наборы
-7. Инференс в IDE: int8-формат, Kotlin и нативные ядра, KV-кэш, политика показа
+7. Инференс в IDE: int8-формат, Kotlin и нативные ядра, KV-кэш, политика показа; что уже в плагинах
 8. Инструменты и дисциплина экспериментов
 9. Что дальше
 
@@ -80,14 +80,14 @@ _, err :=⟨курсор⟩
 Список строит плагин по PSI — все кандидаты корректны по типам.
 ML только переставляет: нужное — наверх.
 
-Go, реальные списки: правила плагина top-1 **0.388**, ранкер **0.710**; C#: 0.367 → 0.588.
+Go, реальные списки: правила плагина top-1 **0.380**, GBDT-ранкер **0.750**; C#: 0.370 → 0.651.
 
 </div>
 </div>
 
 Третий сценарий, бонус: текст внутри строковых литералов (сообщения логов, format-строки, struct-теги).
 
-<!-- Источники: docs/NEURAL-RU.md §1; CHANGELOG e17 (top-1 0.388 правила / 0.710 ранкер); пример — eval-go31m-e2-dump.md. -->
+<!-- Источники: docs/NEURAL-RU.md §1; CHANGELOG e19 (парные held-out списки: top-1 правила 0.380 / 0.370, GBDT 0.750 / 0.651); пример — eval-go31m-e2-dump.md. -->
 
 ---
 
@@ -115,6 +115,40 @@ Go, реальные списки: правила плагина top-1 **0.388**
   «строка из 20 токенов ≤ 150 мс, первая подсказка на холодном файле ≤ 1 с на 8-ядерном ноутбуке».
 
 <!-- Источник: docs/NEURAL-RU.md §2, §5 (бюджет латентности). -->
+
+---
+
+## Две семьи моделей в одном плагине
+
+<div class="two">
+<div>
+
+### Классический ML — списки и факты
+
+- n-граммная LM (32 MB): признак ранкера и запасной inline-режим.
+- Ранкер списка: линейный e17b/e18 → **GBDT e19** (161 / 100 KB, 0.3–0.4 мс на список).
+- Статистика импортов e20 (2.9 / 2.6 MB): какой путь даёт имя, какие импорты ходят вместе.
+- Mapping-подсказки и память принятий — PSI и счётчики, без модели.
+
+Микросекунды–миллисекунды, детерминизм, объяснимые признаки.
+
+</div>
+<div>
+
+### Нейронный — целая строка
+
+- Собственный трансформер 31 M / 50 M, FIM, int8, `NnCompletion`.
+- Серый текст при conf_prod ≥ 0.7; KV-кэш между нажатиями; нативные ядра.
+- Проверка сгенерированных имён — за PSI плагина.
+
+Десятки миллисекунд, «знание» идиом и контекста файла.
+
+</div>
+</div>
+
+Общее: один `ml-core`, один контейнер `.cml` для всех артефактов, один корпус и один harness; каждая функция в плагине выключается в настройках.
+
+<!-- Источник: CHANGELOG e19, e20; models/README.md; docs/IMPORTS-API.md; CLAUDE.md «classical-ML wave» (переключаемость функций). -->
 
 ---
 
@@ -321,7 +355,7 @@ LM, ранкер и оценка **никогда не делят репозит
 
 <!-- _class: lead -->
 
-# 4. Слой 2 — ранкер списка автодополнения
+# 4. Слой 2 — ранкер списка и статистика из корпуса
 
 ---
 
@@ -329,11 +363,12 @@ LM, ранкер и оценка **никогда не делят репозит
 
 - Список строит плагин: Go — `GoCompletionContributor`, C# — `NativeCSharpCompletion` / `NativeCSharpMemberCompletion`. В среднем **48 кандидатов**, до 100 в выборке.
 - Ранкер — линейный, listwise: `score = w · x`, обучение минимизирует `−log softmax(w·x)[chosen]` по списку, L2 1e-4, 10 эпох (`LinearRanker.kt`).
+- С e19 — GBDT над тем же вектором признаков (LightGBM lambdarank → свой `.cml` вида `tree-ranker`, `TreeRanker.kt`); `Rankers.read` выбирает реализацию по виду файла — плагин держит просто `Ranker`.
 - Схема признаков (`FeatureSchema.kt`): 13 общих + языковой блок (Go 17, C# 19), каждый блок **конъюнкция с видом контекста** (6 видов: после `.`, начало оператора, аргумент, позиция типа, правая часть `=`, прочее) → Go 30 × 7 = **210 весов**.
 - Хэш схемы хранится в модели: модель одной схемы отказывается оценивать векторы другой (training/serving parity).
 - Бюджет в IDE: < 5 мс на 500 кандидатов — O(кандидаты × порядок) hash-lookup'ов.
 
-<!-- Источник: ml-core/.../rank/FeatureSchema.kt, LinearRanker.kt; docs/ADAPTER.md §4; CHANGELOG e10, e17. -->
+<!-- Источник: ml-core/.../rank/FeatureSchema.kt, LinearRanker.kt, TreeRanker.kt; docs/ADAPTER.md §3–4; CHANGELOG e10, e17, e19. -->
 
 ---
 
@@ -429,6 +464,71 @@ LM, ранкер и оценка **никогда не делят репозит
 
 ---
 
+<!-- _class: dense -->
+
+## GBDT-ранкер (e19): деревья вместо линейной модели
+
+![chart w:820](charts/ranker_gbdt.svg)
+
+- Почему: `file_freq_log`, `recency_log`, ранги — порядковые и взаимодействуют («самый частый **и** объявлен рядом» стоит больше суммы); линейная модель видит их только через один стандартизованный вес.
+- Конвейер: `ml-train dump-features` (ровно те векторы, что видит `Ranker.score`) → LightGBM `lambdarank` (`tools/gbdt/train_gbdt.py`, 15 % обучающих репо под early stopping, 10–15 с на 8 ядрах) → `ml-train import-gbdt` → `.cml` вида `tree-ranker`.
+- `TreeRanker` в `ml-core`: чистый Kotlin, три режима missing-value LightGBM, паритет с `booster.predict` до 1e-5 (фикстура в репо). Первые 100 деревьев: Go 0.821, C# 0.751 — 49 KB.
+
+<!-- Источник: CHANGELOG e19 (таблица held-out, pipeline, parity); models/README.md (go/cs-rank-gbdt-e19). C#: линейный переобучен на том же сплите 101/26 репо (0.713), чтобы сравнение было парным. -->
+
+---
+
+## GBDT: по видам контекста
+
+![chart w:960](charts/ranker_gbdt_kinds.svg)
+
+Рецепт: 31 лист, lr 0.05, feature_fraction 0.8, bagging 0.8, ≤ 400 раундов с ранней остановкой (Go остановился на 321, C# на 200); `min_data_in_leaf` 50 (Go) / 100 + feature_fraction 0.6 (C#). 63 листа или lr 0.1 меняют валидационный MAP на < 0.001.
+
+<!-- Источник: CHANGELOG e19 «Per context (MRR, GBDT / linear)» и «Recipe». -->
+
+---
+
+<!-- _class: dense -->
+
+## Что выучили деревья
+
+![chart w:860](charts/gbdt_importance.svg)
+
+- 38 % сплитов (в обоих языках) — на копиях признаков, конъюнктивных с видом контекста (`after_dot:freq_rank_log`, `after_dot:lm_logprob` в Go, аргумент в C#): развёрнутая схема нужна и деревьям.
+- Цена в IDE: **0.41 мс** (Go, 321 дерево) / 0.27 мс (C#) на список из 50 на одном ядре — в 50 раз дороже линейного (8 µs), в 12 раз дешевле бюджета weigher'а 5 мс.
+- Следующий рычаг — данные, не модель: C# обучен на 101 репо, Go на 150; кривая e17 (300 репо, линейный 0.808) обещает ещё 1–2 п.п.
+
+<!-- Источник: CHANGELOG e19 («Feature importance», «Parity», «Shipped»). -->
+
+---
+
+<!-- _class: dense -->
+
+## Статистика импортов (e20): какой путь даёт имя
+
+![chart w:880](charts/imports_e20.svg)
+
+- Два вопроса плагина без PSI: `rankImports(name, currentImports)` — для неразрешённого `Client` / `http` / `Task` / `ILogger` какой import path / namespace вероятнее с учётом импортов файла; `rankCoImports(currentImports)` — что обычно импортируют вместе.
+- Данные: lm-фолд, regex-парсеры (`tools/imports/`, строки и комментарии вырезаны): Go 22 432 репо / 1.94 M файлов за 216 с, C# 24 940 / 1.98 M за 424 с; собственные пакеты репозитория исключены.
+
+<!-- Источник: CHANGELOG e20 (таблица «Evaluation»: Go 129 078 запросов, C# 56 689; тест-фолд, ≤ 200 файлов на репо, ≤ 10 запросов на файл); docs/IMPORTS-API.md. -->
+
+---
+
+<!-- _class: dense -->
+
+## Модель импортов: 2.9 / 2.6 MB, запрос 1–3 µs
+
+- `p(path | name)`: Go — из счётчиков `pkg.Ident` через список импортов; C# — **избыток** совместной встречаемости `max(0, c(N,U) − c(N)·c(U)/D)` плюс индекс объявлений типов (lm + rank фолды — объявления это факты). Топ-16 путей на имя, `−ln p` в 1/16 ната.
+- Контекст: PMI пар импортов, топ-32 партнёра; `score = ln p(path | name) + λ·Σ PMI / √n` (λ 1 Go, 0.5 C#): нормировка √n лучше суммы и среднего; бонус «тот же модуль, что у импорта файла» ничего не добавил — убран.
+- Что не помогло: ослабленный прунинг C# (0.1 / 150 k имён: top-1 0.743 при 5.5 MB — здесь прунинг шума и есть точность), вторичные namespace'ы (+0.8 top-1, −1.2 top-3).
+- Co-imports (скрываем один импорт файла, ранжируем от остальных): hit@1 Go **0.209** против 0.123 по частоте, C# **0.297** против 0.237; hit@5 0.478 / 0.592.
+- Kotlin `ImportsModel`: загрузка 80–120 мс, `rankImports` 1–3 µs, `rankCoImports` 15–20 µs, паритет с Python на 50 + 50 запросов. Слабое место: имена из «всеобщих» namespace'ов (`IntPtr` → `System`, 90 % файлов) — только объявления.
+
+<!-- Источник: CHANGELOG e20 («Model», «Tuning», таблица co-imports, «Kotlin»); docs/IMPORTS-API.md («Cost», «Tests»). -->
+
+---
+
 <!-- _class: lead -->
 
 # 5. Слой 3 — собственный трансформер
@@ -478,8 +578,9 @@ logits = RMSNorm_final(x) · tok_emb
 
 - Бюджет: строка ≤ 150 мс, холодный файл ≤ 1 с. Скалярно укладывается только 30 M; с нативными ядрами — 50 M; 100 M требует сжатия контекста или следующего рефакторинга ядер.
 - Решение 2026-10-07: репозиторий несёт **обе** модели на язык (31 M по умолчанию, 50 M опционально), переключатель в плагине — позже.
+- 100 M (`go102m`, `tools/server/train-nn.sh`): оценка **+1.5–2.5 п.п.** к 50 M за 2× латентности — имеет смысл только вместе с дистилляцией.
 
-<!-- Источник: docs/NATIVE-KERNELS.md «End to end» (строки S/M/L при 8 потоках), docs/NEURAL-RU.md §5, CLAUDE.md «Decisions 2026-10-07». -->
+<!-- Источник: docs/NATIVE-KERNELS.md «End to end» (строки S/M/L при 8 потоках), docs/NEURAL-RU.md §5, CLAUDE.md «Decisions 2026-10-07», «classical-ML wave» (оценка для 100 M). -->
 
 ---
 
@@ -985,6 +1086,24 @@ show = confProd ≥ 0.7 ∧ ¬(suppressPunctOnly ∧ punctOnly) ∧ ¬repeated �
 
 ---
 
+<!-- _class: dense -->
+
+## Что уехало в плагины за одну ночь (Go 0.2.209–0.2.214, .NET 0.1.134–0.1.138)
+
+| функция | что делает | как |
+|---|---|---|
+| **Mapping completion** | `Name: src.Name,` по каждому полю + «Map all remaining fields» в struct-литералах / object initializer'ах и блоках присваиваний | сходство имён + партнёр маппинга + проверка типа; чистый PSI, без модели |
+| **Память принятий** («учится у меня») | счётчики принятых элементов по виду контекста на проект, месячное затухание | `+0.3·ln(1+count)` к score ранкера (или weigher без ранкера) |
+| **GBDT-ранкер** | `rank.cml` плагина = e19 | `Rankers.read` → `TreeRanker`, тот же `FeatureSchema` |
+| **Выбор импорта** | порядок в quick fix авто-импорта и в списке неимпортированных пакетов / типов | `ImportsModel.rankImports` ∩ кандидаты PSI (модель предлагает, PSI проверяет) |
+| **Серый текст** | не в комментариях, **да** внутри строк (сообщения логов и ошибок); низкоприоритетный поток модели на prefill; защита от повторов | `NnCompletion` + inline-провайдер |
+
+Всё переключается в настройках, по умолчанию включено. Ничего из этого пока не проверено живым пользователем — только тестами и harness'ом.
+
+<!-- Источник: CLAUDE.md «2026-10-08 morning — classical-ML wave» (версии, список функций, правило переключаемости); idea-golang-support ML_ACCEPTANCE.md; docs/IMPORTS-API.md («Use: intersect with the PSI candidates»). -->
+
+---
+
 <!-- _class: lead -->
 
 # 8. Инструменты и дисциплина
@@ -995,20 +1114,21 @@ show = confProd ≥ 0.7 ∧ ¬(suppressPunctOnly ∧ punctOnly) ∧ ¬repeated �
 
 ```
 ml-core/        чистый Kotlin (stdlib, JDK 21, без preview-API) — встраивается в плагины как git subtree под ml/
-    lex/ ngram/ rank/ bpe/ nn/ (nn/native: JNI-загрузчик со scalar-fallback) format/
+    lex/ ngram/ rank/ (LinearRanker, TreeRanker) imports/ bpe/ nn/ (nn/native: JNI-загрузчик со scalar-fallback) format/
 native/         C11 SIMD-ядра, self-test, bench; `make cross` — 4 платформы через zig
-ml-train/       Kotlin CLI: prepare, shard, l2 (LM), l1 (ранкер), eval-lm, eval-rank, eval-inline, bench-nn
+ml-train/       Kotlin CLI: prepare, shard, l2 (LM), l1 (ранкер), dump-features / import-gbdt, eval-lm, eval-rank, eval-inline, bench-nn
 tools/nn/       PyTorch: tokenizer/ train/ eval/ clean/ distill/ — только обучение
 tools/psi/      headless-экспорт реальных Go-списков; tools/roslyn/ — Roslyn-фильтр и контекст для C#
-tools/corpus/   каталог GitHub и параллельная загрузка;  tools/server/ — рецепты сервера
-models/         опубликованные модели (31/50 M на язык, n-граммы, BPE, паритетные фикстуры)
+tools/gbdt/     LightGBM-тренер ранкера (экспорт деревьев, паритетная фикстура);  tools/imports/ — майнинг статистики импортов
+tools/corpus/   каталог GitHub и параллельная загрузка;  tools/server/ — рецепты сервера, train-nn.sh
+models/         опубликованные модели (31/50 M на язык, n-граммы, линейные и GBDT-ранкеры, статистика импортов, BPE, фикстуры)
 docs/           NEURAL-RU, NN-FORMAT, NATIVE-KERNELS, NN-PARITY, NN-COMPLETION-API, ADAPTER, MAC-CHECK-RU, …
 ```
 
 Плагины: `include(":ml-core")` из `ml/ml-core`; модели — обычные файлы в ресурсах (`<lang>-lm.cml`, `<lang>-rank.cml`, `<lang>-nn.cml` + `.bpe`);
 после изменений движка `ml-core` синхронизируется в оба плагина.
 
-<!-- Источник: README «Layout», docs/ADAPTER.md §1. -->
+<!-- Источник: README «Layout», docs/ADAPTER.md §1, §3; CHANGELOG e19, e20. -->
 
 ---
 
@@ -1060,14 +1180,16 @@ docs/           NEURAL-RU, NN-FORMAT, NATIVE-KERNELS, NN-PARITY, NN-COMPLETION-A
 
 ## Дорожная карта (в порядке приоритета)
 
+Сделано после e18 (ночь 2026-10-08): ✔ GBDT-ранкер (e19) и weigher'ы в обоих плагинах ✔ C#-ранкер на реальных списках в .NET-плагине ✔ статистика импортов (e20) в quick fix и списке ✔ mapping-подсказки, память принятий.
+
 1. **Дистилляция из Qwen2.5-Coder-7B** (sequence-level): `tools/nn/distill/distill.py` сэмплирует FIM-позиции из шардов, учитель генерирует через vLLM, `train.py --teacher/--teacher-rate` подмешивает строки учителя как середины FIM. Запас: Go +14 п.п., C# +23 п.п. на fresh-наборах. Инструменты готовы, генерация идёт.
 2. **Структурный контекст** в промпте (сигнатуры, члены типов из других файлов) — не ради recall (+2–5 %), а ради точности после `.` и скорости (контекст в 3–5 раз короче).
 3. **Constrained decoding** по PSI-кандидатам после `.`: маска первого токена уже есть (`VocabPrefixIndex`) — достаточно подать список допустимых идентификаторов.
-4. **GBDT-ранкер** + log-prob нейромодели как признак; weigher C#-ранкера e18 в плагине .NET.
-5. Переключатель **31 M / 50 M** в плагине; fine-tuning на коде организации (корпус + рецепт воспроизводимы из манифеста).
+4. Ранкер: память принятий как **признак** (схема + переобучение; пока — бонус в плагине), log-prob нейромодели как признак, больше репозиториев в экспорте (C# 101 → 300).
+5. Переключатель **31 M / 50 M** в плагине; 100 M (`go102m`): +1.5–2.5 п.п. за 2× латентности — только после дистилляции; fine-tuning на коде организации (корпус + рецепт воспроизводимы из манифеста).
 6. Инференс: активации целиком в native (убрать копии и диспетчеризацию), int4 для декода на ноутбуках.
 
-<!-- Источник: CLAUDE.md «Next in the queue», «Plan»; commit c575d18 (distill tooling); CHANGELOG e18 (headroom, bigram cache → structure instead); NATIVE-KERNELS.md «Known gaps». -->
+<!-- Источник: CLAUDE.md «Next in the queue», «Plan», «classical-ML wave» (сделано, Open); commit c575d18 (distill tooling); CHANGELOG e18 (headroom), e19 («Next lever»); NATIVE-KERNELS.md «Known gaps». -->
 
 ---
 
@@ -1077,7 +1199,8 @@ docs/           NEURAL-RU, NN-FORMAT, NATIVE-KERNELS, NN-PARITY, NN-COMPLETION-A
 |---|---|---|
 | корпус после фильтров | 4.69 млн файлов, 5.81 G токенов, 22 620 lm-репо | 6.06 млн, 4.22 G, 25 234 |
 | n-грамма (32 MB) ppl / top-1 | 4.6 / 0.510 | 5.3 / 0.487 |
-| ранкер на реальных списках: MRR / top-1 (правила) | **0.808 / 0.710** (0.527 / 0.388); e17b 0.799 | **0.711 / 0.588** (0.526 / 0.367) |
+| ранкер на реальных списках, MRR / top-1: GBDT e19 (линейный; правила) | **0.834 / 0.750** (0.799 / 0.700; 0.513 / 0.380) | **0.759 / 0.651** (0.713 / 0.589; 0.530 / 0.370) |
+| статистика импортов: скрытый импорт top-1 / top-3 (частотный prior) | 0.717 / 0.797 (0.685 / 0.783) | 0.814 / 0.910 (0.777 / 0.885) |
 | трансформер 31 M (int8 31 MB): ppl | 2.99 | 3.80 |
 | остаток строки верен, все позиции / ≤ 8 токенов | **63.6 % / 74.8 %** | **50.2 % / 62.6 %** |
 | гейт 0.7: показано / верно | 25.8 % / 93.5 % | 14.2 % / 94.4 % |
@@ -1086,15 +1209,15 @@ docs/           NEURAL-RU, NN-FORMAT, NATIVE-KERNELS, NN-PARITY, NN-COMPLETION-A
 | строка 20 токенов, 8 потоков: scalar / native q8 | 530 / 167 мс (при наборе 47 / 24) | M1 Pro, 4 потока: 252 / 68 мс |
 | паритет Kotlin ↔ PyTorch | 1000/1000 строк | 40/40 (фикстура в репо) |
 
-<!-- Источник: stats.json; CHANGELOG e17, e18; NN-COMPLETION-API.md; NN-PARITY.md; MAC-CHECK-RU.md; CLAUDE.md (C# preliminary). -->
+<!-- Источник: stats.json; CHANGELOG e18, e19 (парные held-out списки), e20; NN-COMPLETION-API.md; NN-PARITY.md; MAC-CHECK-RU.md. -->
 
 ---
 
 ## Ссылки
 
-- Движок: `github.com/dvislobokov/idea-ml-completion` — `CHANGELOG.md` (e01–e18 с измерениями), `docs/NEURAL-RU.md`, `models/`
-- Плагин Go: `idea-golang-support` (ветка `migration`: ранкер за `-PmlEnabled=true`, inline-провайдер поверх `NnCompletion`)
-- Плагин C#: `idea-dotnet-support` (экспорт списков `mlDataset`, inline-задача `ML_INLINE_TASK.md`)
+- Движок: `github.com/dvislobokov/idea-ml-completion` — `CHANGELOG.md` (e01–e20 с измерениями), `docs/NEURAL-RU.md`, `docs/IMPORTS-API.md`, `docs/ADAPTER.md`, `models/`
+- Плагин Go: `idea-golang-support` (ветка `migration`, 0.2.214: GBDT-ранкер, inline-провайдер поверх `NnCompletion`, mapping, память принятий, выбор импорта)
+- Плагин C#: `idea-dotnet-support` (`master`, 0.1.138: то же; экспорт списков `mlDataset`)
 - Проверить инференс на своей машине за 5 минут: `docs/MAC-CHECK-RU.md` (JDK 21, модель и фикстура в репо, сеть не нужна)
 
 Спасибо. Вопросы?
