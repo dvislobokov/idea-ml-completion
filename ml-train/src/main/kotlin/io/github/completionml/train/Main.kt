@@ -13,6 +13,7 @@ import io.github.completionml.core.rank.ExampleShards
 import io.github.completionml.core.rank.FeatureSchema
 import io.github.completionml.core.rank.LinearRanker
 import io.github.completionml.core.rank.LinearRankerTrainer
+import io.github.completionml.core.rank.Rankers
 import io.github.completionml.core.rank.ProxyExampleGenerator
 import io.github.completionml.core.rank.TrainingExample
 import io.github.completionml.core.spi.MlToken
@@ -36,8 +37,12 @@ usage:
           --dedup 0.8      drop exact duplicates and near-duplicates (MinHash Jaccard over identifiers >= value), train first then test
           --split repo|file  force the split (auto: by repo when >= 20 repos, else by file)
           --test-repos a__b,c__d   hold out exactly these repositories (directory names)
-  eval-rank --lang .. --rank <rank.cml> (--data <dir> --lm <lm.cml> [--max-files N] | --shards <dir>)
-      re-evaluate a ranker (with the LM it was trained with) on the test split of another corpus
+  eval-rank --lang .. --rank <rank.cml> (--data <dir> --lm <lm.cml> [--max-files N] | --shards <dir> [--bench 50])
+      re-evaluate a ranker (linear or tree, with the LM it was trained with) on the test split of another corpus; with --shards also
+      the scoring cost per list of --bench candidates
+  dump-features --shards <dir> --out <file.cmlf.gz>   expanded feature matrix of example shards for tools/gbdt/train_gbdt.py (LightGBM)
+  import-gbdt --lang .. --trees <trees.txt> --out <rank.cml> [--shards <dir>] [--source <text>]
+      text trees from train_gbdt.py --export-trees → .cml kind tree-ranker (schema checked against the shards)
   eval-inline --lang .. --data <dir> --lm <lm.cml> [--cache 0.3] [--max-tokens 8] [--stride 50] [--max-test-files N] [--dump <file> [--dump-conf 0.8] [--dump-n 30]]
       greedy multi-token continuation (inline "grey text") on the test split: how many of the next tokens the LM gets right
   prepare --lang go --data <dir> [--out <dir>/prepared] [--catalog <jsonl>] [--dedup 0.8 (0 = off)] [--max-file-bytes 1048576] [--test 30]
@@ -61,6 +66,8 @@ fun main(argv: Array<String>) {
         "l1" -> trainRanker(args)
         "eval-lm" -> evalLm(args)
         "eval-rank" -> evalRanker(args)
+        "dump-features" -> dumpFeatures(args)
+        "import-gbdt" -> importGbdt(args)
         "eval-inline" -> evalInline(args)
         "tokens" -> dumpTokens(args)
         "prepare" -> prepareCommand(args)
@@ -314,7 +321,12 @@ private fun trainRanker(args: Map<String, String>) {
 
 private fun evalRanker(args: Map<String, String>) {
     val lang = Languages.byId(args.getValue("lang"))
-    val ranker = LinearRanker.read(File(args.getValue("rank")))
+    val ranker = Rankers.read(File(args.getValue("rank")))
+    if (args["shards"] != null) {
+        log("${lang.id}: ranker ${args.getValue("rank")} (${ranker.description}) on ${args.getValue("shards")}")
+        evalRankerOnShards(ranker, File(args.getValue("shards")), args["bench"]?.toInt() ?: 50)
+        return
+    }
     val m = RankMetrics(); val base = RankMetrics()
     val lmIdx = ranker.schema.baseIndex("lm_logprob"); val ruleIdx = ranker.schema.baseIndex("rule_rank_log")
     val rules = RankMetrics()
@@ -323,17 +335,7 @@ private fun evalRanker(args: Map<String, String>) {
         n++; m.add(ex, ranker.scores(ex)); base.add(ex, FloatArray(ex.size) { ex.baseFeature(it, lmIdx) })
         if (ruleIdx >= 0) rules.add(ex, FloatArray(ex.size) { -ex.baseFeature(it, ruleIdx) })
     }
-    if (args["shards"] != null) {
-        val (header, _) = ExampleShards.readAll(File(args.getValue("shards")), object : AbstractMutableList<TrainingExample>() {
-            override val size get() = 0
-            override fun get(index: Int) = throw IndexOutOfBoundsException()
-            override fun add(index: Int, element: TrainingExample) { add(element) }
-            override fun removeAt(index: Int) = throw UnsupportedOperationException()
-            override fun set(index: Int, element: TrainingExample) = throw UnsupportedOperationException()
-        })
-        require(header.schema.hash == ranker.schema.hash) { "ranker schema differs from the shards'" }
-        log("${lang.id}: $n lists from ${args.getValue("shards")}; ranker ${args.getValue("rank")}")
-    } else {
+    run {
         val lm = NgramModel.read(File(args.getValue("lm")))
         val gen = ProxyExampleGenerator(lm.vocab, lm, cacheLambda = args["cache"]?.toDouble() ?: 0.0, baseCount = ranker.schema.baseSize)
         require(gen.schema().hash == ranker.schema.hash) { "ranker schema differs from the generator's" }

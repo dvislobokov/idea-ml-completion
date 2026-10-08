@@ -11,26 +11,23 @@ import kotlin.math.sqrt
  * candidate on standardised features; weights are plain floats so IDE plugins need nothing but this class.
  */
 class LinearRanker(
-    val schema: FeatureSchema,
+    override val schema: FeatureSchema,
     val weights: FloatArray,
     val mean: FloatArray,
     val std: FloatArray,
-) {
+) : Ranker {
     init { require(weights.size == schema.size && mean.size == schema.size && std.size == schema.size) }
 
-    fun score(features: FloatArray): Float {
+    override val description: String get() = "${weights.size} weights"
+
+    override fun score(features: FloatArray): Float {
         var s = 0f
         for (i in weights.indices) s += weights[i] * ((features[i] - mean[i]) / std[i])
         return s
     }
 
-    fun scores(example: TrainingExample): FloatArray {
-        val buf = FloatArray(schema.size)
-        return FloatArray(example.size) { example.expand(it, buf); score(buf) }
-    }
-
     fun write(file: File, language: String, corpusId: String) {
-        ModelFormat.write(file, ModelFormat.Header("ranker", language, schema.hash, System.currentTimeMillis(), corpusId)) { out ->
+        ModelFormat.write(file, ModelFormat.Header(Rankers.KIND_LINEAR, language, schema.hash, System.currentTimeMillis(), corpusId)) { out ->
             out.writeInt(schema.size)
             for (n in schema.names) out.writeUTF(n)
             for (w in weights) out.writeFloat(w)
@@ -42,12 +39,15 @@ class LinearRanker(
     companion object {
         fun read(file: File): LinearRanker = read(file.inputStream(), file.toString())
 
-        fun read(stream: java.io.InputStream, name: String = "ranker model"): LinearRanker = ModelFormat.read(stream, "ranker", { header, inp ->
+        fun read(stream: java.io.InputStream, name: String = "ranker model"): LinearRanker =
+            ModelFormat.read(stream, Rankers.KIND_LINEAR, { header, inp -> readBody(header, inp, name) }, name)
+
+        internal fun readBody(header: ModelFormat.Header, inp: java.io.DataInputStream, name: String): LinearRanker {
             val n = inp.readInt()
             val schema = FeatureSchema(List(n) { inp.readUTF() })
             require(schema.hash == header.schemaHash) { "$name: schema hash mismatch" }
-            LinearRanker(schema, FloatArray(n) { inp.readFloat() }, FloatArray(n) { inp.readFloat() }, FloatArray(n) { inp.readFloat() })
-        }, name)
+            return LinearRanker(schema, FloatArray(n) { inp.readFloat() }, FloatArray(n) { inp.readFloat() }, FloatArray(n) { inp.readFloat() })
+        }
     }
 }
 

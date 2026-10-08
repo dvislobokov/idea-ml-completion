@@ -124,6 +124,8 @@ per-file cache LM (λ=0.3), LM / ranker / test on disjoint repository folds, 300
 | e17 ranker on real Go completion lists, corpus scale (300 rank + 295 test repos, 120 k + 84 k lists) | test fold: MRR 0.808 vs plugin rules 0.527 vs proxy ranker 0.518 (top-1 0.710 / 0.388 / 0.390, top-5 0.934 / 0.685 / 0.666); PSI context adds only 4.8 % of rest-of-line identifiers beyond the file prefix |
 | e18 C# recipe ablations (spm 1.0, **lr 2e-3 / 0.5 M batch**), prefix/beam studies, teacher ceiling (Qwen2.5-Coder via `eval_hf.py`), fresh-repository eval set, DDP | C#: lr 2e-3 → ppl 3.80 (3.97), rest of line exact 50.2 % (47.9 %); prefix 1024 free, 512 −0.8 p.p.; beam 4 +1 p.p. for ×3.6 time; teachers on the same positions: Qwen2.5-Coder-1.5B 63.8 %, 7B 68.4 % (ours 49.4 %), on repos created after 2026-05: 7B 64.1 % vs ours 40.9 %; Qwen3.6 does not do FIM (11.8 %); CPU models rebuilt (Go e14-b ppl 4.6, C# e15-a 5.3 on the new test folds) |
 
+| e19 GBDT ranker (LightGBM lambdarank → own `tree-ranker` `.cml`, `TreeRanker` in `ml-core`) on the real plugin lists, paired with the linear ranker on the same held-out repositories | Go: MRR 0.834 / top-1 0.750 vs linear 0.799 / 0.700 (rules 0.513); C#: 0.759 / 0.651 vs 0.713 / 0.589 (rules 0.530); 161 / 100 KB, 0.41 / 0.27 ms per list of 50 candidates; Kotlin = LightGBM to 1e-5 |
+
 Earlier prototype and scaling tables: `docs/EARLY-RESULTS.md`.
 
 ## Constraints

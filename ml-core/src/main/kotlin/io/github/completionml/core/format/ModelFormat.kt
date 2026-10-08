@@ -17,7 +17,7 @@ object ModelFormat {
     const val VERSION = 2   // v2: n-gram tables stored as CompactFloatMap (24-bit fingerprints, 8-bit quantised values)
 
     class Header(
-        val kind: String,          // "ngram" | "ranker"
+        val kind: String,          // "ngram" | "ranker" | "tree-ranker"
         val language: String,      // MlLanguage.id
         val schemaHash: Long,      // FeatureSchema.hash for rankers, vocabulary/order signature for n-grams
         val createdAt: Long,
@@ -44,13 +44,17 @@ object ModelFormat {
 
     /** Reads a model from a gzip stream (a bundled plugin resource, for instance); [name] is for error messages. The stream is closed. */
     fun <T> read(stream: java.io.InputStream, expectedKind: String, body: (Header, DataInputStream) -> T, name: String = "model"): T =
+        read(stream, setOf(expectedKind), body, name)
+
+    /** Same, accepting any of [expectedKinds] (the body dispatches on `header.kind`). */
+    fun <T> read(stream: java.io.InputStream, expectedKinds: Set<String>, body: (Header, DataInputStream) -> T, name: String = "model"): T =
         DataInputStream(BufferedInputStream(GZIPInputStream(stream), 1 shl 16)).use { inp ->
             val magic = ByteArray(4).also { inp.readFully(it) }.toString(Charsets.US_ASCII)
             require(magic == MAGIC) { "$name: not a .cml model (magic '$magic')" }
             val version = inp.readInt()
             require(version == VERSION) { "$name: model format $version, this build reads $VERSION; retrain" }
             val header = Header(inp.readUTF(), inp.readUTF(), inp.readLong(), inp.readLong(), inp.readUTF(), version)
-            require(header.kind == expectedKind) { "$name: model kind '${header.kind}', expected '$expectedKind'" }
+            require(header.kind in expectedKinds) { "$name: model kind '${header.kind}', expected ${expectedKinds.joinToString(" | ") { "'$it'" }}" }
             body(header, inp)
         }
 }
