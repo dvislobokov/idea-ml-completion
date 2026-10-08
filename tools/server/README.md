@@ -19,3 +19,12 @@ experiment series is a list of one-liners with different tags; each run is self-
 Memory knobs: `XMX_LM` (default 40g), `XMX_RANK` (20g); `PER_FILE` (20 ranker lists per file) and `MAX_TEST` (4000
 evaluation files) bound ranker RAM and evaluation time. Expected on the full corpus: cloning 30–60 min, LM counting
 10–30 min per language, ranker 5–15 min.
+
+## Neural models: `train-nn.sh`
+`tools/server/train-nn.sh <go|csharp> <preset> [run] [train.py args]` trains one of our transformers on both GPUs with the lr2e3
+recipe (the recipe of every published model), exports it to `../ml-data/<lang>/models/<run>.cml` and runs the two standard
+evaluations (3 000 test-fold positions, 2 000 fresh-repository positions). Presets: `go31m`, `go50m`, `go102m` (102.3 M; the same
+presets serve C#). Launch it detached: `systemd-run --unit=<run> --collect -p WorkingDirectory=$PWD bash -c "tools/server/train-nn.sh go go102m go102m-e6 > ../ml-data/go/nn/go102m-e6.queue.out 2>&1"`.
+Expected wall time on 2 × H200: 31 M ~50 min, 50 M ~65–90 min, 102 M ~2.5–3 h per epoch (+15 min export and evals); the run
+resumes from its last checkpoint if restarted with the same run name (`--no-resume` to start over). Publish the result with the
+`models/README.md` row, the CHANGELOG paragraph and a copy into the plugin's `ml-models/<lang>/`.
