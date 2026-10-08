@@ -37,8 +37,14 @@ object NnParity {
     class Fixture(val dir: File, val vocabSize: Int, val prompts: List<LogitPrompt>, val behav: List<BehavRecord>)
 
     val defaultDir: File get() = File(System.getenv("CML_NN_PARITY") ?: (System.getProperty("user.home") + "/work/ml-data/go/nn/parity"))
-    val defaultModel: File get() = File(System.getenv("CML_NN_MODEL") ?: (System.getProperty("user.home") + "/work/ml-data/go/models/go-nn-31m-e1.cml"))
-    val defaultVocab: File get() = File(System.getenv("CML_BPE_VOCAB") ?: (System.getProperty("user.home") + "/work/ml-data/tokenizer/go-16384.bpe"))
+    /** The first existing candidate: the env override, the repository copy (`models/`, `data/`: the test runs in `ml-core/`), the server's data dir. */
+    fun firstExisting(env: String, vararg candidates: String): File {
+        System.getenv(env)?.let { return File(it) }
+        val files = candidates.map { File(it) }
+        return files.firstOrNull { it.exists() } ?: files.last()
+    }
+    val defaultModel: File get() = firstExisting("CML_NN_MODEL", "../models/go-nn-31m-e2.cml", System.getProperty("user.home") + "/work/ml-data/go/models/go31m-e2.cml")
+    val defaultVocab: File get() = firstExisting("CML_BPE_VOCAB", "../models/go-16384.bpe", System.getProperty("user.home") + "/work/ml-data/tokenizer/go-16384.bpe")
 
     fun available(): Boolean = File(defaultDir, "meta.json").isFile && File(defaultDir, "prompts.bin").isFile && File(defaultDir, "behav.bin").isFile && defaultModel.isFile && defaultVocab.isFile
 

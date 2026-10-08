@@ -182,6 +182,15 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
 - Argument context ("item 5") was already covered by the exported lists (ARGUMENT kind, MRR Go 0.855 / C# 0.736) — no re-export needed.
 - Open: acceptance counts as a ranker FEATURE (engine schema change + retrain; plugins add a bonus for now), nn-probability feature.
 
+## 2026-10-08 ~06:00 МСК — the server is about to be deleted; everything that matters is on GitHub
+- Engine `main`, Go plugin `migration` (0.2.214 + ML-FEATURES-RU.md), .NET plugin `master` (0.1.138, ML zip committed) are pushed and clean.
+- In the engine repo now: all shipped models (`models/`), the real lists (`data/{go,csharp}-psi`), teacher lines (`data/*-distill`), the heal-parity
+  fixture (`data/go-nn-parity-heal`; `NnHealParityTest` / `NnParity` find fixture, model and vocab in the repo without env vars), the deck.
+- NOT on GitHub (user downloads or re-creates): `~/work/backup/ckpts-evals-2026-10-07.tar` (1.9 GB: the four .pt checkpoints of the shipped
+  models + evals; without it a fine-tune/continuation needs a retrain, ~1 h per 31 M model on 2 × H200 via `tools/server/train-nn.sh`);
+  mined import counts (`~/work/ml-data/*/imports`, regenerable in 10 min with `tools/imports/mine_imports.py`); corpora (`fetch-catalog.sh`,
+  ~1 h), HF teachers, Go module cache. New box: `docs/MIGRATION-SERVER-RU.md` + `tools/server/setup.sh`, then `rebuild-data.sh`.
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher

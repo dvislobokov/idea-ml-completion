@@ -28,7 +28,7 @@ class NnHealParityTest {
     )
 
     companion object {
-        val defaultDir: File get() = File(System.getenv("CML_NN_HEAL_PARITY") ?: (System.getProperty("user.home") + "/work/ml-data/go/nn/parity-heal"))
+        val defaultDir: File get() = NnParity.firstExisting("CML_NN_HEAL_PARITY", "../data/go-nn-parity-heal", System.getProperty("user.home") + "/work/ml-data/go/nn/parity-heal")
         fun available() = File(defaultDir, "heal.bin").isFile && NnParity.defaultModel.isFile && NnParity.defaultVocab.isFile
 
         private fun DataInputStream.bytes(): ByteArray = ByteArray(readInt()).also { readFully(it) }

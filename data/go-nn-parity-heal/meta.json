@@ -1,0 +1,58 @@
+{
+ "ckpt": "/root/work/ml-data/go/nn/go31m-e2/ckpt-latest.pt",
+ "step": 13065,
+ "lang": "go",
+ "vocab": "/root/work/ml-data/tokenizer/go-16384.bpe",
+ "vocabSha256": "770a316b50d621d5b6a21d2c7e08efde5a2539c558682eec04ec0550f5934c8c",
+ "seed": 1,
+ "stride": 50,
+ "positions": 3000,
+ "n_records": 297,
+ "ctx": 2000,
+ "max_prefix": 1450,
+ "suffix_tokens": 512,
+ "max_new": 48,
+ "stats": {
+  "n": 297,
+  "healed": 262,
+  "exact": 204,
+  "shown": 54,
+  "shown_exact": 51,
+  "repeat": 1,
+  "limit": 1
+ },
+ "kinds": {
+  "after-ident": [
+   49,
+   41
+  ],
+  "after-other": [
+   95,
+   77
+  ],
+  "after-open": [
+   47,
+   28
+  ],
+  "after-dot": [
+   10,
+   4
+  ],
+  "typed-space": [
+   44,
+   24
+  ],
+  "mid-ident": [
+   43,
+   25
+  ],
+  "after-assign": [
+   1,
+   0
+  ],
+  "line-start": [
+   8,
+   5
+  ]
+ }
+}
