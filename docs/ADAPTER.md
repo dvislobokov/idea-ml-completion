@@ -92,6 +92,23 @@ ml-train l1 --lang go --shards ../ml-data/go/shards/rank --test-shards ../ml-dat
 ml-train eval-rank --lang go --rank rank.cml --shards ../ml-data/go/shards/test
 ```
 
+**Tree ranker (e19).** The same shards also train a LightGBM `lambdarank` model, which beats the linear one by 3.5–4.6 p.p. MRR
+(CHANGELOG e19). The feature semantics stay in `ml-core`: `ml-train dump-features` writes the expanded vectors, `tools/gbdt/train_gbdt.py`
+trains and exports text trees, `ml-train import-gbdt` writes a `.cml` of kind `tree-ranker` read by `core.rank.TreeRanker`:
+
+```sh
+ml-train dump-features --shards <rank dir> --out rank.cmlf.gz;  ml-train dump-features --shards <test dir> --out test.cmlf.gz
+python -I tools/gbdt/train_gbdt.py --train rank.cmlf.gz --test test.cmlf.gz --export-trees go.trees.txt --fixture go-parity.tsv
+ml-train import-gbdt --lang go --trees go.trees.txt --shards <rank dir> --out go-rank-gbdt.cml
+ml-train eval-rank --lang go --rank go-rank-gbdt.cml --shards <test dir>      # metrics + µs per list of 50 candidates
+```
+
+**Loading in the plugin.** Use `Rankers.read(file)` / `Rankers.read(stream, name)` instead of `LinearRanker.read`: it returns the
+`Ranker` interface (`schema`, `score(features)`, `scores(example)`, `description`) and picks `LinearRanker` or `TreeRanker` from the
+container kind, so a plugin that keeps its model as `Ranker` can ship either file as `rank.cml` without code changes. The schema check
+(`ranker.schema.names == <plugin>Features.schema.names`) and the scoring loop (`FeatureSchema.expand` + `ranker.score`) are the same
+for both; the tree ranker costs ~0.3–0.4 ms per list of 50 candidates on one core (linear: 8 µs), still far inside the weigher budget.
+
 ## 4. Weigher (IDE path)
 
 `CompletionWeigher` / `LookupElementWeigher` of the plugin:

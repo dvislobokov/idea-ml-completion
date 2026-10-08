@@ -718,3 +718,66 @@ prod ≥ 0.8 with 97 % exact lines — the same share the 7B shows at its 0.7 ga
 Smoke on the C# shards (6 min + 3 min resume): resume continues exactly (step 399 → 591, loss continuous); throughput while both GPUs were shared with the
 teacher evaluations 1.3 M tok/s; clean measurement on idle GPUs **2.45 M tok/s** (1.96× one GPU at 1.25 M; 428 ms per 1 M-token step), so a
 31 M epoch takes 47 min instead of 77. The Go baseline `go31m-e2` (scrubbed corpus, fim 0.7, lr 2e-3 / 0.5 M) runs on both GPUs with it.
+
+## e19 — GBDT ranker on the real lists (LightGBM lambdarank → own `tree-ranker` `.cml`, `TreeRanker` in `ml-core`)
+
+**Why.** The linear rankers (e17b/e18) see the 13 common + language features only through standardised weights conjoined with the
+context kind; frequency, recency and rank features are ordinal and interact (a candidate that is both the most frequent *and* declared
+nearby is worth more than the sum). Gradient-boosted trees learn such thresholds and interactions and are still pure arithmetic at
+inference, so they fit the hard constraint (no third-party runtime in the plugins).
+
+**Pipeline (feature semantics stay in `ml-core`).** `ml-train dump-features --shards <dir> --out <f.cmlf.gz>` writes the *expanded*
+vectors exactly as `FeatureSchema.expand` + `Ranker.score` see them (gzip, big-endian: names, per-list repo/kind/chosen/size, then the
+f32 matrix; Go 1.12 M × 210, C# 1.02 M × 224). `tools/gbdt/train_gbdt.py` (LightGBM 4.7, `lambdarank`, `map@100` = MRR for one
+relevant item per list) holds out 15 % of the *training* repositories by md5 for early stopping / tuning — the test repositories are
+only reported — then exports the trees as text, re-implements the decision rule in numpy and checks it against `booster.predict`
+(max diff 0), and writes a parity fixture of whole test lists. `ml-train import-gbdt --lang … --trees … --shards <dir> --out <cml>`
+checks the names against the shard schema and writes a `.cml` of kind `tree-ranker` (`ModelFormat` v2 container; body: schema
+names, then per tree `i32 feature (−1 = leaf) f64 threshold u8 flags i32 left i32 right f64 value`, flags = default-left bit +
+LightGBM missing type none/zero/NaN). `core.rank.TreeRanker` reproduces `Tree::NumericalDecision` including the three missing-value
+modes (NaN → 0 unless the split was learnt with NaN; zero-missing takes the default direction, `kZeroThreshold` 1e-35) and sums leaf
+values in double. New `Ranker` interface (`schema`, `score`, `scores`, `description`) over `LinearRanker` and `TreeRanker`; `Rankers.read`
+dispatches on the container kind so a plugin that holds a `Ranker` can ship either file. `eval-rank --shards` now takes either kind and
+reports the scoring cost per list of `--bench` candidates after JIT warm-up.
+
+**Data fix on the way.** 19 of the 250 Go shards in `data/go-psi` had been copied while the exporter was still writing (11 truncated
+gzip streams, 8 empty files); restored from the originals in `~/work/ml-data/go/psi` (byte-identical otherwise). `ml-train l1` on the
+restored directories reproduces e17b exactly. The C# shards have no test export: the e19 split holds out 26 of the 127 repositories by
+md5 of the name (`data/csharp-psi/test-split-e19.txt`), the linear ranker retrained on the other 101 gives 0.713 (e18's ad hoc 4:1
+split: 0.711), so the comparison below is paired on identical lists.
+
+**Recipe.** 31 leaves, lr 0.05, feature_fraction 0.8, bagging 0.8, up to 400 rounds with early stopping (patience 50); min_data_in_leaf
+50 for Go, 100 + feature_fraction 0.6 for C# (chosen on the validation repositories: MAP 0.771 vs 0.762–0.766 for the default, 15 leaves
+and lr 0.03). Training takes 10–15 s on 8 cores; 63 leaves or lr 0.1 change the validation MAP by < 0.001 on Go.
+
+| held-out lists | top-1 | top-5 | MRR | model | per list of 50 (1 core) |
+|---|---|---|---|---|---|
+| **Go** (11 845 lists, 100 test repos): plugin rules | 0.380 | 0.662 | 0.513 | — | — |
+| linear e17b (210 weights) | 0.700 | 0.926 | 0.799 | 4 KB | 8 µs |
+| **GBDT e19, 321 trees** | **0.750** | **0.943** | **0.834** | 161 KB | 414 µs |
+| GBDT, first 100 trees | 0.732 | 0.937 | 0.821 | 49 KB | 137 µs |
+| **C#** (4 608 lists, 26 held-out repos): plugin rules | 0.370 | 0.728 | 0.530 | — | — |
+| linear (224 weights, same split) | 0.589 | 0.873 | 0.713 | 4 KB | 8 µs |
+| **GBDT e19, 200 trees** | **0.651** | **0.895** | **0.759** | 100 KB | 269 µs |
+| GBDT, first 100 trees | 0.641 | 0.892 | 0.751 | 49 KB | 163 µs |
+
+Per context (MRR, GBDT / linear): Go after `.` 0.767 / 0.738, statement start 0.850 / 0.824, argument 0.878 / 0.855, type 0.870 / 0.843,
+assignment 0.822 / 0.792, other 0.874 / 0.782; C# after `.` 0.669 / 0.635, statement 0.763 / 0.706, argument 0.801 / 0.747, type 0.715 /
+0.689, assignment 0.824 / 0.773, other 0.749 / 0.713 — every bucket gains, most where the linear model was weakest (Go `OTHER` +9 p.p.).
+Feature importance (gain share, Go / C#): `file_freq_log` 29 / 42 %, `recency_log` 14 / 17 %, `freq_rank_log` 9.6 / 2.1 %, `lm_rank_log`
+9.6 / 2.6 %, `prefix_case_match` 4.6 / 10.2 %, `decl_distance_log` 4.6 / 1.2 %, `declared_in_file` 3.7 % (Go), `scope_level` 3.5 / 2.4 %,
+`in_vocab` 2.9 / 1.6 %, `rule_rank_log` 2.5 / 5.2 %, `lm_delta_best` 2.2 / 1.0 %, `expected_type_match` 1.7 % (Go), `lm_global_logprob`
+1.4 / 1.0 %, `lm_logprob` 1.4 / 1.0 %, `list_size_log` 1.2 / 1.2 %: in-file statistics dominate, the n-gram enters mostly through its
+within-list rank; 38 % of the splits (both languages) are on the kind-conjoined copies — after `.` for the LM features in Go
+(`after_dot:freq_rank_log`, `after_dot:lm_global_logprob`, `after_dot:lm_logprob`), argument position in C# — so the expanded layout
+is worth keeping for the trees too.
+
+**Parity.** `ml-core/src/test/resources/rank/`: the two shipped models plus 8 whole test lists per language (366 / 478 rows, expanded
+features + `booster.predict`); `TreeRankerTest` reproduces the scores within 1e-5 (float32 output of a double sum; the text export itself
+matches `booster.predict` exactly in numpy) and the top-1 of every list, and unit-tests the three missing modes and the text/`.cml` round trip. Kotlin `eval-rank` on the full
+test shards gives the same MRR/top-1 as Python to three decimals. Scoring cost measured with a warmed JIT loop over real rows (this
+server, one thread): 0.41 ms per list of 50 for Go, 0.27 ms for C# — 50× the linear ranker but far below the 5 ms weigher budget.
+
+**Shipped:** `models/go-rank-gbdt-e19.cml`, `models/cs-rank-gbdt-e19.cml`. The linear rankers are unchanged (`go-rank-e17b.cml`,
+`cs-rank-e18.cml`); the plugins switch by loading `rank.cml` through `Rankers.read` (docs/ADAPTER.md §3). Next lever for the ranker is
+data, not model: C# has 101 training repositories, Go 150; the Go curve from e17 (300 repos, 0.808 linear) suggests another 1–2 p.p.
