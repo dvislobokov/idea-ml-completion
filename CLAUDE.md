@@ -178,7 +178,7 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
   (preset `go102m` exists; expectation 100 M vs 50 M: +1.5–2.5 p.p. for 2× latency — not worth it without distillation).
 - Plugins (all pushed, nothing verified live): Go `migration` 0.2.209–0.2.213 (mapping completion, acceptance memory `ML_ACCEPTANCE.md`,
   GBDT as `rank.cml`, grey text not in comments but ON inside strings, low-priority model thread `NnThread`, repetition guard);
-  .NET `master` 0.1.134–0.1.137 (the same). Running: import-choice agents for both plugins (e20 → 0.2.214 / 0.1.138).
+  .NET `master` 0.1.134–0.1.137 (the same). Import choice by e20 statistics shipped: Go 0.2.214 (4868d09, auto-import fix + weigher; also fixed same-name packages being deduplicated in the lookup), .NET 0.1.138 (14391f8, import-type fix + unimported-type completion).
 - Argument context ("item 5") was already covered by the exported lists (ARGUMENT kind, MRR Go 0.855 / C# 0.736) — no re-export needed.
 - Open: acceptance counts as a ranker FEATURE (engine schema change + retrain; plugins add a bonus for now), nn-probability feature.
 
