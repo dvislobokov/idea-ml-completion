@@ -718,3 +718,58 @@ prod ≥ 0.8 with 97 % exact lines — the same share the 7B shows at its 0.7 ga
 Smoke on the C# shards (6 min + 3 min resume): resume continues exactly (step 399 → 591, loss continuous); throughput while both GPUs were shared with the
 teacher evaluations 1.3 M tok/s; clean measurement on idle GPUs **2.45 M tok/s** (1.96× one GPU at 1.25 M; 428 ms per 1 M-token step), so a
 31 M epoch takes 47 min instead of 77. The Go baseline `go31m-e2` (scrubbed corpus, fim 0.7, lr 2e-3 / 0.5 M) runs on both GPUs with it.
+
+## e20 — import statistics: which import path / namespace supplies a name, which imports go together (`models/*-imports-e20.cml`, `core.imports`)
+
+Two plugin questions answered from corpus counts, no PSI needed: `rankImports(name, currentImports)` — for an unresolved identifier
+(Go `Client`, `Context`, `Logger` or a bare qualifier `http`; C# `Task`, `List`, `JsonSerializer`, `ILogger`), which import path /
+namespace is most likely given the imports already in the file; `rankCoImports(currentImports)` — what files with these imports
+usually also import. Tooling `tools/imports/` (README with the commands), reader + queries `ml-core/.../core/imports/ImportsModel.kt`,
+plugin notes `docs/IMPORTS-API.md`.
+
+**Data** (`mine_imports.py`, lm fold only, status `ok`, ≤ 500 files per repository evenly sampled, one task per repository so the
+repository's own packages / namespaces can be dropped; 16 workers): Go 22 432 repos / 2.12 M files → 1.94 M files with non-local
+imports, 216 s; C# 24 940 / 2.67 M → 1.98 M, 424 s. File-level counts: Go `pkg.Ident` references resolved through the import list
+(exact: `http.Client` → (`Client`, `net/http`); aliases, `/v2`, `.v3`, `go-` handled; the qualifier itself is a key too), import pairs;
+C# `using` directives, PascalCase identifiers used but not declared in the file, `class|struct|interface|enum|record` declarations
+with their namespace, using pairs. Regex parsers (`imports_parse.py`), strings and comments stripped.
+
+**Model** (`pack_imports.py`, Python reference `imports_model.py`): `p(path | name)` — Go from the reference counts; C# from the
+co-occurrence **excess** `max(0, c(N,U) − c(N)·c(U)/D)` (files beyond chance; kept when ≥ 0.3·c(N)) plus declarations
+(declared types → namespace, for namespaces imported by ≥ 200 files; the declaration index also takes the **rank** fold, where
+dotnet/runtime, aspnetcore and efcore happen to live — declarations are facts, the usage statistics stay lm-only). Top 16 paths per
+name, `−ln p` in 1/16 nat bytes; co-imports as PMI `ln(c(a,b)·D/(c(a)·c(b)))`, top 32 partners by pair count for paths imported by
+≥ 30 / 20 files, signed byte. Query 1: `ln p(path | name) + λ·Σ PMI(path, present)/√n` (λ 1 Go, 0.5 C#); query 2:
+`ln p(path) + Σ PMI`. Artifacts: `go-imports-e20.cml` **2.90 MB** (46 312 paths, 125 204 names, 10 164 co-lists),
+`cs-imports-e20.cml` **2.56 MB** (13 856 paths, 106 458 names, 11 971 co-lists); `ModelFormat` gzip container, kind `imports`.
+
+**Evaluation** (`eval_imports.py`, test fold, ≤ 200 files per repository, ≤ 10 queries per file, seed 1): for every referenced
+identifier whose import is present, hide that import and rank it back from the others. C# truth = the single present using that
+declares the identifier (declaration index lm + rank + the test repositories' own files); local usings/imports excluded.
+
+| test fold | queries (repos / files) | name known | prior only: top-1 / top-3 | **with context**: top-1 / top-3 | known names only: prior → context |
+|---|---|---|---|---|---|
+| Go | 129 078 (295 / 19 633) | 91.7 % | 0.685 / 0.783 | **0.717 / 0.797** | 0.746 → 0.782 top-1, 0.853 → 0.869 top-3 |
+| C# | 56 689 (290 / 16 725) | 96.4 % | 0.777 / 0.885 | **0.814 / 0.910** | 0.806 → 0.845, 0.918 → 0.944 |
+
+Co-imports (one random import of each file with ≥ 2 known imports hidden, ranked from the rest; baseline = global frequency order):
+
+| test fold | files | hit@1 / @5 / @10 | frequency order |
+|---|---|---|---|
+| Go | 16 347 | 0.209 / 0.478 / 0.627 | 0.123 / 0.442 / 0.552 |
+| C# | 12 477 | 0.297 / 0.592 / 0.712 | 0.237 / 0.482 / 0.583 |
+
+Tuning on 300 rank-fold repositories (Go 128 735 queries, C# 54 572): the PMI sum normalised by √n beats the raw sum and the mean
+(Go top-1 0.761 vs 0.760 / 0.760, prior 0.727; the raw sum is best at λ 0.5 and collapses at λ 2: 0.705). A "same module prefix as
+a present import" bonus adds nothing (+0.07 p.p.: PMI already carries it) — removed. C#: declarations alone are a flat prior
+(0.647 → 0.724 with context); usage excess alone 0.730 and context *hurts* it (0.688 at λ 1: the excess lists are noisy —
+property names count as identifiers); both together with the strict share 0.3 and ≤ 40 k usage names 0.801 / 0.889 (looser
+share 0.1 / 150 k names: 0.743, 5.5 MB — pruning noise is accuracy here); keeping secondary namespaces relative to the strongest
+(`--excess-rel`, `--decl-rel`) +0.8 top-1 but −1.2 top-3, rejected; rank-fold declarations +0.7 / +1.3 on the test fold (adopted).
+Known weakness: names from near-universal namespaces (`IntPtr` → `System`, imported by 90 % of files) have no co-occurrence signal
+and rely on the declarations; Go pruning from 4.0 to 2.9 MB (names ≥ 5 files, co-lists for paths ≥ 30 files) costs 0.2 p.p.
+
+**Kotlin** (`ImportsModel`, heap arrays + two hash maps): `read` 80–120 ms; warmed-up `rankImports` 1–3 µs, `rankCoImports` 15–20 µs
+(`ImportsParityTest`, this server). `ImportsModelTest` (hand-made artifact, numbers by hand), `ImportsParityTest` (50 + 50 queries per
+language vs the Python reference, fixtures in `src/test/resources/imports/`, skipped without `../models`). Not done: the plugin side
+(intersect with PSI candidates, popup ordering) and a C# parser better than regexes (Roslyn would give exact name → namespace truth).
