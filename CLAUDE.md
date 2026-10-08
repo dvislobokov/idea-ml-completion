@@ -170,6 +170,18 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
 - Not on GitHub: checkpoints (.pt) — ~/work/backup/ckpts-evals-2026-10-07.tar (1.9 GB; the four shipped models + evals + parity fixture),
   the module cache /root/go/pkg/mod (50 GB, re-downloadable), HF models (re-downloadable), corpora (re-downloadable in ~1 h).
 
+## 2026-10-08 morning (05:30 МСК) — classical-ML wave (user: "features in the plugins must be switchable")
+- Engine: **e19 GBDT ranker** (`Rankers.read` → `LinearRanker` | `TreeRanker`; `tools/gbdt/train_gbdt.py`, ml-train `dump-features` / `import-gbdt`;
+  `models/{go,cs}-rank-gbdt-e19.cml`; Go MRR 0.834 vs linear 0.799, C# 0.759 vs 0.713 on paired held-out lists) and **e20 import statistics**
+  (`core.imports.ImportsModel`, `tools/imports/`, `models/{go,cs}-imports-e20.cml` ≈ 2.7 MB each; name → import path top-1 Go 0.717 / C# 0.814
+  with the file's imports as context vs 0.685 / 0.777 prior). `tools/server/train-nn.sh <lang> <preset>` = one-command transformer training
+  (preset `go102m` exists; expectation 100 M vs 50 M: +1.5–2.5 p.p. for 2× latency — not worth it without distillation).
+- Plugins (all pushed, nothing verified live): Go `migration` 0.2.209–0.2.213 (mapping completion, acceptance memory `ML_ACCEPTANCE.md`,
+  GBDT as `rank.cml`, grey text not in comments but ON inside strings, low-priority model thread `NnThread`, repetition guard);
+  .NET `master` 0.1.134–0.1.137 (the same). Running: import-choice agents for both plugins (e20 → 0.2.214 / 0.1.138).
+- Argument context ("item 5") was already covered by the exported lists (ARGUMENT kind, MRR Go 0.855 / C# 0.736) — no re-export needed.
+- Open: acceptance counts as a ranker FEATURE (engine schema change + retrain; plugins add a bonus for now), nn-probability feature.
+
 ## Plan (agreed with the user, in order) — items 1, 2 (n-gram part), 3 (first models) and 5 (download) are DONE as of 2026-10-06
 Open decisions for the user: (a) ship our own native kernels (spike done, ×3–4; needs a test on the user's Mac: NEON + dylib loading);
 (b) PSI context compression in the training format (decide before the next big run); (c) hardware — 2×B300 would turn 20-hour teacher
