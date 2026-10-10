@@ -14,11 +14,14 @@ import kotlin.test.assertTrue
 
 /**
  * Parity of [NnCompletion] (token healing, constrained first tokens, repetition guard, confidences, show decision)
- * with the Python harness on the real trained Go model. Fixture: `~/work/nn/eval/make_parity_heal.py` →
- * `~/work/ml-data/go/nn/parity-heal/heal.bin` (env `CML_NN_HEAL_PARITY`); model and vocabulary as in [NnParity].
- * Skipped when any of them is absent.
+ * with the Python harness on the real trained Go model. Fixture: `tools/nn/eval/make_parity_heal.py` →
+ * `data/go-nn-parity-heal/heal.bin` (env `CML_NN_HEAL_PARITY`); model and vocabulary as in [NnParity].
+ * Skipped when any of them is absent. The fixture header says which healing it was made with: `nn-heal-1` is the rule of
+ * 2026-10-07 (the test then runs with `healTrailingSpace = false`), `nn-heal-2` carries the heal-ws flag of healing v2.
  */
 class NnHealParityTest {
+    class Fixture(val healTrailingSpace: Boolean, val records: List<Record>)
+
     class Record(
         val name: String, val mode: String, val kind: String, val path: ByteArray, val before: ByteArray, val after: ByteArray,
         val ctx: Int, val maxPrefix: Int, val suffixTokens: Int, val maxNew: Int, val typed: ByteArray, val prompt: IntArray,
@@ -35,11 +38,14 @@ class NnHealParityTest {
         private fun DataInputStream.u16s(n: Int): IntArray = IntArray(n) { readUnsignedShort() }
         private fun DataInputStream.f32s(n: Int): FloatArray = FloatArray(n) { readFloat() }
 
-        fun load(dir: File = defaultDir): List<Record> {
+        fun load(dir: File = defaultDir): Fixture {
             val out = ArrayList<Record>()
+            var healWs = false
             DataInputStream(BufferedInputStream(FileInputStream(File(dir, "heal.bin")), 1 shl 20)).use { d ->
-                require(d.readUTF() == "nn-heal-1")
+                val version = d.readUTF()
+                require(version == "nn-heal-1" || version == "nn-heal-2") { "unknown heal fixture $version" }
                 d.readInt() // vocab size
+                if (version == "nn-heal-2") healWs = d.readInt() != 0
                 repeat(d.readInt()) {
                     val name = d.readUTF(); val mode = d.readUTF(); val kind = d.readUTF()
                     val path = d.bytes(); val before = d.bytes(); val after = d.bytes()
@@ -53,7 +59,7 @@ class NnHealParityTest {
                     out += Record(name, mode, kind, path, before, after, ctx, maxPrefix, sufTok, maxNew, typed, prompt, gen, lps, stop, stopLp, confProd, confMin, punct, rep, show, miss, exact, text, trueCode)
                 }
             }
-            return out
+            return Fixture(healWs, out)
         }
     }
 
@@ -67,7 +73,7 @@ class NnHealParityTest {
             perKind.entries.joinToString("\n") { (k, v) -> "    %-12s n=%d same text %d exact kotlin/python %d/%d".format(k, v[0], v[1], v[2], v[3]) })
     }
 
-    fun run(weights: NnFormat.Model, kernels: NnKernels, threads: Int, tok: BpeTokenizer, records: List<Record>): Stats {
+    fun run(weights: NnFormat.Model, kernels: NnKernels, threads: Int, tok: BpeTokenizer, records: List<Record>, healTrailingSpace: Boolean): Stats {
         val st = Stats(kernels.name)
         NnModel(weights, threads, kernels).use { model ->
             if (kernels is NativeNnKernels) kernels.prepare(weights.tensors.values.filterIsInstance<NnTensor.Q8>())
@@ -79,7 +85,8 @@ class NnHealParityTest {
                         NnCompletion(model, tok, NnCompletion.Options(
                             mode = if (r.mode == "plain") NnCompletion.Mode.PLAIN else NnCompletion.Mode.SPM,
                             ctx = r.ctx, maxPrefix = r.maxPrefix, suffixTokens = r.suffixTokens, maxNew = r.maxNew, showThreshold = 0.8,
-                            trimClosersAfterCaret = false))   // the fixture is the untrimmed generation; healMode WORD_EOL = make_parity_heal.py --heal word-eol
+                            trimClosersAfterCaret = false,    // the fixture is the untrimmed generation; healMode WORD_EOL = make_parity_heal.py --heal word-eol
+                            healTrailingSpace = healTrailingSpace))   // as the fixture header says (make_parity_heal.py --heal-ws / --no-heal-ws)
                     }
                     s.truncate(0)
                     val res = c.complete(r.path, r.before, r.after, s)
@@ -105,16 +112,18 @@ class NnHealParityTest {
 
     @Test fun healedCompletionMatchesPython() {
         assumeTrue(available(), "heal parity fixture / model / vocab not present: $defaultDir (${File(defaultDir, "heal.bin").isFile}), ${NnParity.defaultModel} (${NnParity.defaultModel.isFile}), ${NnParity.defaultVocab} (${NnParity.defaultVocab.isFile})")
-        val all = load()
+        val fx = load()
+        val all = fx.records
         val limit = (System.getProperty("completionml.nn.parity.heal") ?: "120").toInt()
-        val records = if (all.size > limit) all.filterIndexed { i, _ -> i % ((all.size + limit - 1) / limit) == 0 } else all
+        // the hand-made trailing-ws cases are always in; the rest is subsampled to the limit
+        val records = if (all.size > limit) all.filterIndexed { i, r -> r.kind == "trailing-ws" || i % ((all.size + limit - 1) / limit) == 0 } else all
         val weights = NnFormat.read(NnParity.defaultModel)
         val tok = BpeTokenizer.load(NnParity.defaultVocab.toPath())
         assertEquals(weights.meta["tokenizerSha256"], NnParity.sha256(NnParity.defaultVocab))
         val kernels = listOfNotNull(ScalarNnKernels, NativeNnKernels.loadOrNull(NativeNnKernels.Mode.F32), NativeNnKernels.loadOrNull(NativeNnKernels.Mode.Q8))
         for (k in kernels) {
-            val st = run(weights, k, 4, tok, records)
-            println("== heal parity, ${k.name}, ${records.size} of ${all.size} records\n$st")
+            val st = run(weights, k, 4, tok, records, fx.healTrailingSpace)
+            println("== heal parity (trailing whitespace typed: ${fx.healTrailingSpace}), ${k.name}, ${records.size} of ${all.size} records\n$st")
             for (d in st.diffs) println(d)
             assertEquals(st.n, st.sameTyped, "${k.name}: typed remainder differs")
             assertEquals(st.n, st.samePrompt, "${k.name}: prompt ids differ")
@@ -127,7 +136,9 @@ class NnHealParityTest {
 
     @Test fun fixtureContainsAllHealingKinds() {
         assumeTrue(available(), "heal parity fixture not present: $defaultDir")
-        val kinds = load().map { it.kind }.toSet()
+        val fx = load()
+        val kinds = fx.records.map { it.kind }.toSet()
         assertTrue(kinds.containsAll(listOf("typed-space", "mid-ident")), "kinds $kinds")
+        if (fx.healTrailingSpace) assertTrue("trailing-ws" in kinds, "a healing-v2 fixture without the trailing-ws cases: $kinds")
     }
 }

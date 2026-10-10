@@ -835,3 +835,41 @@ and rely on the declarations; Go pruning from 4.0 to 2.9 MB (names ≥ 5 files, 
 (`ImportsParityTest`, this server). `ImportsModelTest` (hand-made artifact, numbers by hand), `ImportsParityTest` (50 + 50 queries per
 language vs the Python reference, fixtures in `src/test/resources/imports/`, skipped without `../models`). Not done: the plugin side
 (intersect with PSI candidates, popup ordering) and a C# parser better than regexes (Roslyn would give exact name → namespace truth).
+
+## healing v2 — the whitespace before the caret is typed remainder (2026-10-10, `NnCompletion.Options.healTrailingSpace`)
+
+**Problem.** In the editor nothing usually follows the caret on the line, so at `return ⟨⟩`, `throw new ⟨⟩`, `var x = ⟨⟩` the last
+pre-token of the line is a lone ` ` (the pre-tokenizer attaches a space to the *next* word only when there is one), `healedBoundary`
+stayed at the caret, the prompt ended with a trailing-space token and the model had to write the word **without** its space (`Check`,
+`Hello`) — a split that never occurs in training, where the space belongs to the word (` Check`, ` Hel` `lo`). The caret fine-tuning
+(cs50m-caret-ft5e5, cs102m-caret-ft5e5) was built with the same prompts: 12 % of the C# documents ended with a single space, the
+models learned "word without a space after a space token" and started dropping the space where nobody typed one: `Task.FromResult(⟨⟩)` →
+`newHelloReply {` (both fine-tuned models; the base `cs50m-e3-lr2e3` and `cs31m-e2` write `new HelloReply`), `stringConnectionString`,
+`classSiteOptions`, Go `rangeSupportedLanguages` — about 0.5 % of answers.
+
+**Rule** (after the pre-token boundary and the word rule of `healMode`): if only spaces and tabs stand between the boundary and the
+previous non-blank byte of the line, the boundary moves back over them and they become typed remainder — `return ⟨⟩` → remainder ` `,
+prompt ends at `return`; `throw new ⟨⟩` → ` ` after ` new`; `x =  ⟨⟩` → `  `; `foo(\t⟨⟩` → `\t`; `foo( ⟨⟩)` → ` `. A line holding
+nothing but indentation before the caret is left alone (remainder `""`), as are `return Hel⟨⟩` (` Hel`, the word rule) and
+`Task.FromResult(⟨⟩)` (`(`). The text after the caret takes no part. Decoding is the usual constrained one: the first tokens must start
+with the whitespace, `Result.text` does not contain it, so the insertion never doubles the space; `healMiss` when the model fails to
+reproduce it. Reference, byte for byte: `heal_trailing_ws(text, bol, boundary)` of csharp-dataset-prepare (`tools/ctxtrain/flcctx.py`),
+which also rebuilds the fine-tuning data (`heal_ws.py`); here `NnCompletion.healTrailingWhitespace` and `eval_inline.heal_trailing_ws`.
+
+**Code.** `NnCompletion.Options.healTrailingSpace` (default true; false = the rule of 2026-10-07, for A/B); `eval_inline.py
+--heal-ws | --no-heal-ws` (default on, recorded in the report as "trailing whitespace typed"); `make_parity_heal.py --heal-ws |
+--no-heal-ws` writes header `nn-heal-2` with the flag and adds the hand-made `trailing-ws` cases (Go and C#) to the fixture;
+`NnHealParityTest` reads `nn-heal-1` (runs with the old rule) and `nn-heal-2` (runs as the header says), keeps every `trailing-ws`
+record in the subsample and requires the kind in a v2 fixture. Tests: `NnCompletionTest.trailingWhitespaceBeforeTheCaretIsTyped`
+(every example above, the option off, the pure rule on bytes), the constrained-decoding test with ` `, `  `, `\t` remainders (the
+first token starts with it, `before + text` equals the generated line once), the boundary test updated (`x =  ⟨⟩` → `  `, `a  ⟨⟩b` →
+`  `); `NnCSharpModelTest` on the real C# network of `models/` (`CML_NN_MODEL_CS`, default `cs-nn-50m-e3-lr2e3`): `Task.FromResult(⟨⟩)`
+→ `new HelloReply …` and `return ⟨⟩` → remainder ` `, prompt ending at `return`, text without a leading space. Plugins: their
+`prefill` builds the prompt through `healedBoundary`, so the KV cache of a file opened at `return ⟨⟩` is the prompt cut at `return`,
+and the first keystroke (`return i⟨⟩`, the word rule heals from ` i`) reuses all of it.
+
+**Not done here.** The Go heal-parity fixture in `data/go-nn-parity-heal` is still `nn-heal-1` (made on the server with go31m-e2;
+no GPU or checkpoint on this machine): regenerate it with `make_parity_heal.py` on the next GPU box. With the current fine-tuned
+C# models the position `Task.FromResult(⟨⟩)` has no whitespace before the caret, so the rule changes nothing there — the glue goes
+away with the models retrained on the corrected data; `NnCSharpModelTest.newKeepsItsSpaceAtFromResult` is the gate for them
+(`CML_NN_MODEL_CS=<fine-tuned .cml>`).

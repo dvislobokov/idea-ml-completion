@@ -17,8 +17,8 @@ class NnCompletionTest {
 
     // ------------------------------------------------------------------------------------------------ boundaries
 
-    private fun typed(before: String, after: String, mode: NnCompletion.HealMode = NnCompletion.HealMode.WORD_EOL): String {
-        val c = NnCompletion(model(), tok, NnCompletion.Options(ctx = 400, maxNew = 8, healMode = mode))
+    private fun typed(before: String, after: String, mode: NnCompletion.HealMode = NnCompletion.HealMode.WORD_EOL, ws: Boolean = true): String {
+        val c = NnCompletion(model(), tok, NnCompletion.Options(ctx = 400, maxNew = 8, healMode = mode, healTrailingSpace = ws))
         val bb = b(before)
         val boundary = c.healedBoundary(bb, b(after))
         return String(bb, boundary, bb.size - boundary, Charsets.UTF_8)
@@ -35,8 +35,10 @@ class NnCompletionTest {
         assertEquals("", typed("func main() {\n    ", "foo()\n"))    // line start after the indentation
         assertEquals(" 1", typed("x = 1", "\n"))                     // caret at the end of a word at the end of the line: heal from the word start
         assertEquals(" 1", typed("x = 1", ""))                        // no text after the caret: the same
-        assertEquals("", typed("x =  ", "\n"))                       // trailing whitespace before the newline
-        assertEquals(" ", typed("a  ", "b\n"))                       // the run `  ` splits as ` ` + ` b`: the caret is inside ` b`
+        assertEquals("  ", typed("x =  ", "\n"))                     // trailing whitespace before the newline joins the remainder (healing v2)
+        assertEquals("", typed("x =  ", "\n", ws = false))           // the rule of 2026-10-07: the whitespace run is its own pre-token
+        assertEquals("  ", typed("a  ", "b\n"))                      // the run `  ` splits as ` ` + ` b`: the caret is inside ` b`, the first space joins too
+        assertEquals(" ", typed("a  ", "b\n", ws = false))
         assertEquals("", typed("", "x\n"))                           // empty file
         // a word being typed (the live-IDE case of 2026-10-07: `return le⟨⟩` continued ` le` + `(` instead of ` len(`)
         assertEquals(" le", typed("\treturn le", "\n}\n"))             // end of line after the caret
@@ -44,6 +46,40 @@ class NnCompletionTest {
         assertEquals("", typed("o.Get", ".Name\n"))                   // more code after the caret: WORD_EOL leaves a finished word
         assertEquals("Get", typed("o.Get", ".Name\n", NnCompletion.HealMode.WORD))      // WORD heals it anyway
         assertEquals("", typed("\treturn le", "\n}\n", NnCompletion.HealMode.BOUNDARY)) // the old rule
+    }
+
+    /**
+     * Healing v2: the whitespace right before the caret is typed, the prompt ends at the last non-blank byte of the line
+     * (`return ⟨⟩` → `return` + ` `), so the model writes the word with its space as in training instead of a word
+     * without one after a lone space token (the glue `newHelloReply` of the caret-fine-tuned models, 2026-10-10).
+     */
+    @Test fun trailingWhitespaceBeforeTheCaretIsTyped() {
+        assertEquals(" ", typed("        return ", ""))               // nothing after the caret: the prompt ends with `return`
+        assertEquals(" ", typed("        return ", "\n}\n"))
+        assertEquals(" ", typed("        throw new ", ""))           // the prompt ends with ` new`
+        assertEquals(" ", typed("        var exception = ", ""))
+        assertEquals("  ", typed("x =  ", ""))                        // two spaces: both
+        assertEquals("\t", typed("\t\tfoo(\t", ""))                   // a tab
+        assertEquals(" ", typed("foo( ", ")"))                        // the paired closer after the caret changes nothing
+        assertEquals(" \t ", typed("a \t ", ""))                      // a mixed run
+        assertEquals("", typed("        ", ""))                       // the indentation of an empty line: left alone
+        assertEquals("", typed("x := 1\n        ", ""))
+        assertEquals("", typed("x := 1\n\t\t", "foo()\n"))
+        assertEquals(" Hel", typed("return Hel", ""))                 // a word being typed: the word rule, as before
+        assertEquals(" x", typed("return x", ";"))                    // a finished word before a closer: the word rule, as before
+        assertEquals("(", typed("Task.FromResult(", ")"))             // no whitespace before the caret: as before
+        // the option off restores the rule of 2026-10-07 (the A/B switch)
+        assertEquals("", typed("        return ", "", ws = false))
+        assertEquals("", typed("\t\tfoo(\t", "", ws = false))
+        assertEquals(" ", typed("foo( ", ")", ws = false))           // ` )` is one pre-token: the space was typed before v2 too
+        // the pure rule on bytes: the reference `heal_trailing_ws(text, bol, boundary)`
+        val c = NnCompletion(model(), tok, NnCompletion.Options(ctx = 400, maxNew = 8))
+        assertEquals(6, c.healTrailingWhitespace(b("return  "), 0, 8))
+        assertEquals(8, c.healTrailingWhitespace(b("        "), 0, 8))   // only whitespace before: unchanged
+        assertEquals(8, c.healTrailingWhitespace(b("\n    x = \t"), 1, 10))   // back over ` \t` to the `=`
+        assertEquals(5, c.healTrailingWhitespace(b("\n    "), 1, 5))     // the indentation after the LF: unchanged
+        assertEquals(2, c.healTrailingWhitespace(b("ab c"), 0, 3))       // a boundary right after a space moves before it
+        assertEquals(4, c.healTrailingWhitespace(b("ab c"), 0, 4))       // no whitespace before: unchanged
     }
 
     @Test fun closersAfterTheCaretAreTrimmed() {
@@ -113,13 +149,20 @@ class NnCompletionTest {
             val c = NnCompletion(m, tok, NnCompletion.Options(ctx = 400, maxNew = 12, repGuard = false, trimClosersAfterCaret = false))   // text == raw minus typed
             m.newSession(512).use { s ->
                 val cases = listOf("x := foo(" to ")\n", "\tfoo()" to ";\n", "f(\"x\"" to ")\n", "x = " to "foo\n", "e.Hi" to "gh\n",
-                    "if err != nil {\n\t\treturn" to " err\n", "x" to " = 1\n", "a.B(c, \"d\"" to ", e)\n")
+                    "if err != nil {\n\t\treturn" to " err\n", "x" to " = 1\n", "a.B(c, \"d\"" to ", e)\n",
+                    // healing v2: the typed whitespace (`return ⟨⟩`, two spaces, a tab) — the first token starts with it, the text does not repeat it
+                    "\treturn " to "\n}\n", "x =  " to "\n", "\t\tfoo(\t" to "")
                 for ((before, after) in cases) {
                     val r = c.complete(b("main.go"), b(before), b(after), s)
                     val raw = tok.decodeBytes(r.tokens)
                     assertTrue(VocabPrefixIndex.startsWith(raw, r.typed), "'$before': generated ${String(raw)} does not start with typed '${String(r.typed)}'")
                     assertFalse(r.healMiss)
                     assertContentEquals(raw.copyOfRange(r.typed.size, raw.size), r.text)
+                    if (before.endsWith(" ") || before.endsWith("\t")) {
+                        assertTrue(r.typed.isNotEmpty() && r.typed.all { it == ' '.code.toByte() || it == '\t'.code.toByte() }, "'$before': typed '${String(r.typed)}'")
+                        // inserting the text after what the user typed gives the generated line once: the whitespace is not doubled
+                        assertContentEquals(b(before).copyOf(b(before).size - r.typed.size) + raw, b(before) + r.text)
+                    }
                     // the healed prompt ends at the boundary: it equals the prompt of the text cut there
                     val cut = b(before).let { it.copyOf(it.size - r.typed.size) }
                     assertContentEquals(c.buildPrompt(b("main.go"), cut, cut.size, b(after)), r.prompt)

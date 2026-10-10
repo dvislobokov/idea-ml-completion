@@ -25,7 +25,7 @@ Inputs (all `ByteArray`, UTF-8):
 - `after` — text after the caret: the rest of the current line (needed for healing — `foo(⟨⟩)` is one pre-token `()`) and the following lines (the SPM suffix starts at the end of the current line, ≤ 16 KB / ≤ `suffixTokens` tokens). May be empty.
 
 Steps:
-1. **Healing.** `healedBoundary(before, after)` = the last pre-token boundary ≤ caret, scanning the current line from the LF before it (the newline token owns the indentation) to the end of the line. The bytes `before[boundary, end)` are the *typed remainder* (`""` in ~90 % of positions, `(`, `)`, `"`, `()`, `")`, a space, `Hi` of `High`…). The prompt is built from `before[0, boundary)`.
+1. **Healing.** `healedBoundary(before, after)` = the last pre-token boundary ≤ caret, scanning the current line from the LF before it (the newline token owns the indentation) to the end of the line; then the word rule of `healMode` and, since healing v2, the whitespace rule of `healTrailingSpace` (the spaces and tabs before the caret join the remainder: `return ⟨⟩` → the prompt ends at `return`, remainder ` `). The bytes `before[boundary, end)` are the *typed remainder* (`""` in most positions, `(`, `)`, `"`, `()`, `")`, a space, `Hi` of `High`…). The prompt is built from `before[0, boundary)`.
 2. **Prompt.** `Options.mode` SPM (default): `<|fim_prefix|><|fim_suffix|> suffix <|fim_middle|> <|file_sep|> path\n prefix` with `ctx` 2000, `maxPrefix` 1450, `suffixTokens` 512; or PLAIN: header + prefix tail. `session.prefill(prompt)` reuses the cached common prefix.
 3. **Decode.** Greedy, ≤ `maxNew` (48) tokens. While the typed remainder is pending, only `VocabPrefixIndex.allowed(remainder)` ids may be chosen (tokens starting with the remainder, or tokens that are a proper prefix of it — then the rest of the remainder constrains the next step); their log-probabilities are from the masked softmax. Stops at any token starting with LF/CR or a special token (`Stop.NEWLINE` / `SPECIAL`), at the token limit (`LIMIT`), or when the **repetition guard** fires (`REPEAT`: a BPE n-gram, n ≤ 4, ≥ 4 bytes, three times in a row).
 4. **Result.**
@@ -39,7 +39,22 @@ Steps:
 
 `Options` defaults: `mode = SPM, ctx = 2000, maxPrefix = 1024 (was 1450: no measurable loss, ~25 % less cold prefill; suffix 256 would cost −0.6 p.p., 128 −1.7), suffixTokens = 512, maxNew = 48, prefixBytes = 40 000,
 suffixBytes = 16 000, heal = true, healMode = WORD_EOL, repGuard = true, showThreshold = 0.7, suppressPunctOnly = true,
-trimClosersAfterCaret = true`.
+trimClosersAfterCaret = true, healTrailingSpace = true`.
+
+- **`healTrailingSpace`** (healing v2, 2026-10-10): in the editor nothing usually follows the caret, so at `return ⟨⟩`, `throw new ⟨⟩`,
+  `var x = ⟨⟩` the last pre-token of the line was a lone ` ` and the prompt ended with it — a split the model never saw in training,
+  where the space always belongs to the next word (` Check`, ` Hel` `lo`). The caret fine-tuning used the same prompts (12 % of the
+  C# documents ended with a single space), the models learned "a word without its space" and lost the space where nobody typed it:
+  `Task.FromResult(⟨⟩)` → `newHelloReply {`, `stringConnectionString`, Go `rangeSupportedLanguages` (~0.5 % of answers; the base
+  models do not do it). Now the spaces and tabs before the caret join the typed remainder — `return ⟨⟩` → remainder ` ` and the
+  prompt ends at `return`; `x =  ⟨⟩` → `  `; `foo(\t⟨⟩` → `\t`; `foo( ⟨⟩)` → ` ` — unless only indentation precedes the caret on the
+  line (an empty line stays as it is); the text after the caret plays no part. Decoding is constrained as for any remainder (the
+  first tokens must start with the whitespace, `Result.text` does not contain it, `healMiss` if the model did not reproduce it), so
+  what the editor inserts never doubles the space. The rule is `NnCompletion.healTrailingWhitespace` = `eval_inline.heal_trailing_ws`
+  = `heal_trailing_ws` of csharp-dataset-prepare (`tools/ctxtrain/flcctx.py`), byte for byte: the data of the next fine-tuning is
+  built with it. `false` is the rule of 2026-10-07 for A/B runs (`eval_inline.py --no-heal-ws`, `make_parity_heal.py --no-heal-ws`;
+  the fixture header `nn-heal-2` tells `NnHealParityTest` which rule it was made with). The glue at `Task.FromResult(⟨⟩)` itself (no
+  whitespace before the caret) goes away only with models fine-tuned on the corrected data.
 
 - **`healMode`** (2026-10-07, after the first live run in the Go plugin): a caret right after a word is itself a pre-token boundary
   (`return le⟨⟩`), so plain boundary healing left ` le` as a finished token and the model continued it with `(`. `WORD_EOL` heals

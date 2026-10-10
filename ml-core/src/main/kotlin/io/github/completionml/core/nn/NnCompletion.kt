@@ -167,7 +167,9 @@ class VocabPrefixIndex(private val tok: BpeTokenizer) {
  *  1. **Token healing** — the prompt is cut back to the last pre-token boundary at or before the caret
  *     ([BpeTokenizer.lastPreTokenBoundary] over the current line, newline byte included, up to the end of the line
  *     after the caret), so a caret inside a punctuation run (`foo(⟨⟩)`, `"x"⟨⟩)`, `foo()⟨⟩;`), after a typed space or
- *     inside an identifier never produces a token split the model has not seen in training. The bytes between the
+ *     inside an identifier never produces a token split the model has not seen in training; the word rule of
+ *     [Options.healMode] and the trailing-whitespace rule of [Options.healTrailingSpace] (`return ⟨⟩`: the prompt ends
+ *     at `return`, the space is typed) move the cut further back. The bytes between the
  *     boundary and the caret (the *typed remainder*) constrain decoding: while a remainder is pending, only tokens
  *     that start with it or are a prefix of it ([VocabPrefixIndex.allowed]) may be generated, with probabilities from
  *     the masked softmax; the remainder is stripped from the returned text.
@@ -209,6 +211,16 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         val suppressPunctOnly: Boolean = true,
         /** Drop the suggestion's tail that repeats the closers already after the caret (`return len(⟨⟩)`: the editor paired the `)`). */
         val trimClosersAfterCaret: Boolean = true,
+        /**
+         * Healing v2 (2026-10-10): the spaces and tabs right before the caret join the typed remainder (`return ⟨⟩` → the prompt
+         * ends at `return`, remainder ` `; `x =  ⟨⟩` → `  `; `foo(\t⟨⟩` → `\t`), so the first token has to start with that
+         * whitespace — the split the model saw in training (` Check`, ` Hel` `lo`). Before, the prompt ended with a lone
+         * trailing-space token and the model had to write the word without its space; fine-tuned on such prompts, the models
+         * learned it and dropped the space where nobody typed it (`Task.FromResult(⟨⟩)` → `newHelloReply`). The indentation of
+         * an otherwise empty line stays as it is. The training data of the caret fine-tuning follows the same rule
+         * (csharp-dataset-prepare `heal_trailing_ws`, byte for byte). False: the rule of 2026-10-07, for A/B comparisons.
+         */
+        val healTrailingSpace: Boolean = true,
     )
 
     /**
@@ -267,7 +279,9 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
 
     /**
      * Healed cut of [before]: the last pre-token boundary at or before the caret, scanning the current line from the
-     * newline byte before it (or the file start) to the end of the line in [after].
+     * newline byte before it (or the file start) to the end of the line in [after]; then the word rule of [Options.healMode]
+     * and the trailing-whitespace rule of [Options.healTrailingSpace] ([healTrailingWhitespace]), in that order. The text after
+     * the caret does not take part in the whitespace rule.
      */
     fun healedBoundary(before: ByteArray, after: ByteArray): Int {
         val bol = lineStart(before)
@@ -281,7 +295,20 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         if (options.healMode != HealMode.BOUNDARY && boundary == caret && caret > 0 && isWordByte(line[caret - 1]) &&
             (options.healMode == HealMode.WORD || (0 until restOfLine).all { isCloserOrSpace(after[it]) })
         ) boundary = tok.lastPreTokenBoundary(line, 0, caret - 1, line.size)   // the start of the word's pre-token
+        if (options.healTrailingSpace) boundary = healTrailingWhitespace(line, bol - from, boundary)
         return from + boundary
+    }
+
+    /**
+     * [boundary] moved back over the spaces and tabs before it on its line, unless nothing but whitespace precedes it on the
+     * line (the indentation of an empty line: then it stays). [bol] is where the line starts in [text] (after the LF). The
+     * reference is `heal_trailing_ws(text, bol, boundary)` of csharp-dataset-prepare (`tools/ctxtrain/flcctx.py`) and of
+     * `eval_inline.py`: the rule the fine-tuning data is built with, byte for byte.
+     */
+    fun healTrailingWhitespace(text: ByteArray, bol: Int, boundary: Int): Int {
+        var b = boundary
+        while (b > bol && (text[b - 1] == SPACE || text[b - 1] == TAB)) b--
+        return if (b > bol) b else boundary
     }
 
     /** Letters, digits, `_` and non-ASCII bytes: the pre-tokenizer's word classes (`cmlbpe.pretokenize_reference`). */
@@ -398,6 +425,8 @@ class NnCompletion(val model: NnModel, val tok: BpeTokenizer, val options: Optio
         /** No letter, digit, underscore, non-ASCII byte or quote: closers such as `);`, `}`, `)]` (or nothing at all). */
         /** Closers and the whitespace between them, as the editor pairs them: `)` `]` `}` `>` `;` `,` quotes, backtick. */
         const val CLOSERS = " \t\r)]}>;,\"'`"
+        private const val SPACE = ' '.code.toByte()
+        private const val TAB = '\t'.code.toByte()
 
         fun punctOnly(text: ByteArray): Boolean {
             for (b in text) {

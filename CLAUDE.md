@@ -128,7 +128,10 @@ agent S (C# real-list exporter → e18) — resume from `~/work/ml-data/csharp/p
   total (the exporter copies + indexes the whole repository per repo), rank 300 repos ≈ 8 h, test cut to 100 repos. Then
   `ml-train l1 --lang csharp --shards csharp/psi/rank --test-shards csharp/psi/test` → e18 ranker; the plugin side (weigher) follows.
 - Plugin tasks written for other agents: `idea-dotnet-support/ML_INLINE_TASK.md`, `ML_RANKER_EXPORT_TASK.md` (done), `idea-golang-support/ML_INLINE_TASK.md`.
-- Known gotchas: two evals must not share `--scratch` (checkpoint copy race); Gradle test env/fixture changes need `cleanTest`; 8 parallel
+- Known gotchas: two evals must not share `--scratch` (checkpoint copy race); Gradle test env/fixture changes need `cleanTest` **and
+  `--no-build-cache`** (`org.gradle.caching=true`: with the same inputs the old test report comes back from the cache, env vars such as
+  `CML_NN_MODEL_CS` are not inputs — seen 2026-10-10 on Windows); `gradlew --stop` kills every daemon of that Gradle version on the
+  machine, including a plugin's `runIde` sandbox and test runs in the other repositories; 8 parallel
   Kotlin compilations run out of memory — compile worktrees sequentially (`~/work/cs-export-launch.sh`).
 
 ## 2026-10-07 evening — the server will be deleted soon (user's warning at ~20:00)

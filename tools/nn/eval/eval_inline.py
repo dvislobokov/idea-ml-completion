@@ -281,6 +281,7 @@ def line_end(text, start):
 
 
 HEAL_MODE = "boundary"      # set from --heal: boundary | word | word-eol
+HEAL_WS = True              # set from --heal-ws / --no-heal-ws: healing v2, the whitespace before the cursor is typed (heal_trailing_ws)
 _CLOSERS = set(b" \t\r)]}>;,\"'`")
 
 
@@ -288,15 +289,32 @@ def _is_word_byte(c):
     return 65 <= c <= 90 or 97 <= c <= 122 or c == 95 or c >= 128 or 48 <= c <= 57
 
 
-def pretoken_boundary(text, bol, cursor, eol, mode=None):
+def heal_trailing_ws(text: bytes, bol: int, boundary: int) -> int:
+    """Healing v2 (2026-10-10): `boundary` moved back over the spaces and tabs before it on its line (`bol` = the line start
+    after the LF), unless only whitespace precedes it on the line — the indentation of an empty line — in which case it stays.
+    The whitespace becomes typed remainder: the prompt ends at `return`, the first token must start with the space, as the
+    model saw it in training (` Check`, ` Hel` `lo`); before, the prompt ended with a lone space token and the model had to
+    write the word without its space — fine-tuned on such prompts (12 % of the caret documents), the models dropped the
+    space where nobody typed it (`Task.FromResult(⟨⟩)` → `newHelloReply`). The same function, byte for byte, builds the
+    fine-tuning data (csharp-dataset-prepare `tools/ctxtrain/flcctx.py`) and runs in `NnCompletion.healTrailingWhitespace`."""
+    b = boundary
+    while b > bol and text[b - 1] in b" \t":
+        b -= 1
+    return b if b > bol else boundary
+
+
+def pretoken_boundary(text, bol, cursor, eol, mode=None, heal_ws=None):
     """Healing boundary at or before `cursor`. `boundary`: the last pre-token boundary (the cmlbpe scanner runs over the
     current line including the newline byte before it — the newline token owns the indentation — and the rest of the
     line after the cursor: what follows decides where a punctuation run or a word ends). `word`: additionally, a caret
     right after letters/digits (`return le⟨⟩`, a pre-token boundary because the word ends there) heals from the start of
     that word, so the model may choose ` len` instead of continuing a finished ` le`. `word-eol`: the same only when the
     rest of the line after the caret is empty, whitespace or closers (the typing situation; `o.Get⟨⟩.Name` stays as is).
-    Mirrors `BpeTokenizer.healBoundary`."""
+    Then, with `heal_ws` (default `HEAL_WS`), `heal_trailing_ws` moves the result back over the whitespace before it.
+    Mirrors `NnCompletion.healedBoundary`."""
     mode = mode or HEAL_MODE
+    if heal_ws is None:
+        heal_ws = HEAL_WS
     start = bol - 1 if bol > 0 else 0
     pos = start
     last = start
@@ -310,10 +328,11 @@ def pretoken_boundary(text, bol, cursor, eol, mode=None):
     if pos <= cursor:
         prev = last
         last = pos
+    b = last
     if mode != "boundary" and last == cursor and cursor > start and _is_word_byte(text[cursor - 1]):
         if mode == "word" or all(c in _CLOSERS for c in text[cursor:eol]):
-            return prev
-    return last
+            b = prev
+    return heal_trailing_ws(text, bol, b) if heal_ws else b
 
 
 def make_position(text, toks, j, d, fi, cursor=None, kind=None):
@@ -1019,7 +1038,8 @@ def markdown(report):
     row("stopped at newline / hit 48-token limit / repetition stop", "—", lambda s: f"{pct(s['stop_newline'])} / {pct(s['stop_limit'])} / {pct(s['stop_repeat'])} %")
     row("positions healed (typed remainder non-empty)", "—", lambda s: f"{pct(s['healed'])} % (remainder not reproduced: {s['heal_miss']})")
     L.append("")
-    L.append(f"Token healing: `{info.get('heal', 'none')}`; repetition guard: {'on' if info.get('rep_guard') else 'off'}; decoding: {'beam ' + str(info['beam']) if info.get('beam', 1) > 1 else 'greedy'}.\n")
+    L.append(f"Token healing: `{info.get('heal', 'none')}` (trailing whitespace typed: {'on' if info.get('heal_ws') else 'off'}); "
+             f"repetition guard: {'on' if info.get('rep_guard') else 'off'}; decoding: {'beam ' + str(info['beam']) if info.get('beam', 1) > 1 else 'greedy'}.\n")
     for m in modes:
         s = report["modes"][m]["summary"]
         L.append(f"## {m}: show policy (gate conf_prod; shown % / line exact % of shown / useful shown % (its precision %) / mean chars)\n")
@@ -1097,6 +1117,9 @@ def markdown(report):
         L.append("- Token healing: where the cursor is inside a pre-token (punctuation run such as `);`, `()`, `\")`; a typed space; "
                  "a partial identifier) the prompt ends at the pre-token boundary and the generation is constrained to start with "
                  "the typed bytes, which are then stripped. Probabilities of constrained steps come from the masked softmax.")
+        if info.get("heal_ws"):
+            L.append("- Healing v2: the spaces and tabs before the cursor are typed remainder too (`return ⟨⟩`: the prompt ends at `return`, "
+                     "the first token must start with the space), unless the line holds nothing but indentation before the cursor.")
     return "\n".join(L) + "\n"
 
 
@@ -1174,6 +1197,9 @@ def main():
     ap.add_argument("--no-in-string", action="store_true", help="skip the extra in-string positions")
     ap.add_argument("--heal", default="word-eol", choices=("none", "boundary", "word", "word-eol"),
                     help="token healing: cut the prompt to the last pre-token boundary and constrain the first token(s) to the typed remainder")
+    ap.add_argument("--heal-ws", dest="heal_ws", action="store_true", default=True,
+                    help="healing v2 (default on): the whitespace before the cursor is typed remainder, the prompt ends at the last non-blank byte (heal_trailing_ws)")
+    ap.add_argument("--no-heal-ws", dest="heal_ws", action="store_false", help="the rule of 2026-10-07 (A/B)")
     ap.add_argument("--rep-guard", dest="rep_guard", action="store_true", default=True, help="decode-time repetition guard (default on)")
     ap.add_argument("--no-rep-guard", dest="rep_guard", action="store_false")
     ap.add_argument("--beam", type=int, default=1, help="beam width (1 = greedy); score = sum of log-probs incl. the stop token")
@@ -1211,8 +1237,9 @@ def main():
     t0 = time.time()
     files = read_manifest(a.manifest)
     heal = a.heal != "none"
-    global HEAL_MODE
+    global HEAL_MODE, HEAL_WS
     HEAL_MODE = a.heal if heal else "boundary"
+    HEAL_WS = a.heal_ws
     positions = sample_positions(files, a.repos, a.positions, a.stride, a.seed, not a.no_in_string, a.typed_extras, a.max_typed_extras)
     main_pos = [p for p in positions if p["kind"] not in EXTRA_KINDS]
     extra_pos = [p for p in positions if p["kind"] in EXTRA_KINDS]
@@ -1236,7 +1263,7 @@ def main():
                            n_positions=len(main_pos), n_in_string=n_extra["in-string"], n_extra=n_extra,
                            n_files=len({p["fi"] for p in main_pos}), stride=a.stride, seed=a.seed, ctx=a.ctx,
                            suffix_tokens=a.suffix_tokens, max_prefix=a.max_prefix, max_new=a.max_new, batch=a.batch, modes=modes,
-                           heal=a.heal, rep_guard=a.rep_guard, beam=a.beam, typed_extras=a.typed_extras,
+                           heal=a.heal, heal_ws=a.heal_ws, rep_guard=a.rep_guard, beam=a.beam, typed_extras=a.typed_extras,
                            time_modes_s={}, time_prompts_s=0.0), "ngram_ref": LANG["ngram"], "modes": {}}
     positions_by_mode = {}
     for mode in modes:
